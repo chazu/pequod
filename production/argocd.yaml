@@ -8,7 +8,7 @@ metadata:
 spec:
   project: production
   source:
-    path: argo-cd/overlays/production
+    path: argocd/overlays/production
     repoURL: git@github.com:chazu/pequod
     targetRevision: HEAD
   destination:
