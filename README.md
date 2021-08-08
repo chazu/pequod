@@ -22,13 +22,24 @@ Bootstrappable Cloud Computing Laboratory
     └── argocd
         └── install.yaml
 ```
+
+
 ## TODO
+- Add terraform folder & scripts for terraform (for building cluster)
 - Script/make target to get argocd admin password
+- Script/make target to bootstrap server with k3s, retrieve config and add to kubeconfig file
 - Automate addition of repository for argocd
-- Add terraform folder & scripts for terraform
 - Automate test environment setup using kind
 - Parameterize ingress and other relevant details when bootstrapping
-- Start adding workloads, possibly adding tooling to support simple configuration depending on use case
+- Start adding workloads, possibly adding tooling to support simple configuration
+depending on use case
+- Add workload: crossplane
+- Add workload: OAM
+- Add workload: cert-manager
+- Add workload: osiris
+- Add workload: argo workflows/events
+- Add workload: earthly/drone
+- Add workload: grafana/prometheus
 
 ## DONE
 - add .gitignore
