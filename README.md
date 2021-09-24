@@ -5,6 +5,14 @@ Bootstrappable Cloud Computing Laboratory
 ## Quick Start
 
 ```
+make add-cluster-config
+make bootstrap
+make argo-password # Returns the admin argo password
+# Port forward argocd here
+argocd login localhost:8080
+# Add your repository to argocd via Make target
+make argo-add-config-repo
+
 
 ```
 

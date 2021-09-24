@@ -3,6 +3,8 @@ import ast
 import getpass
 import os
 from pathlib import Path
+import paramiko
+from paramiko.client import SSHClient
 import shutil
 import subprocess
 import sys
@@ -10,17 +12,19 @@ import time
 import yaml
 
 if __name__ == "__main__":
-    from paramiko.client import SSHClient
+
 
     cluster_name = input("new cluster name:")
     hostname = input("hostname:")
     username = input("username:")
-    password = getpass.getpass("password:")
+    password = getpass.getpass("password (blank to use keypair auth:") or None
 
     home = str(Path.home())
 
     # SSH in and download the config file to a tempfile
     client = SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
     client.load_system_host_keys()
     client.connect(hostname,
                    username=username,
@@ -37,6 +41,8 @@ if __name__ == "__main__":
     # Backup current kubeconfig
     now = time.time()
     shutil.copyfile(f"{home}/.kube/config", f"{home}/.kube/config-backup-{now}")
+
+    # TODO If config exists, snip it out
 
     # splice relevant bits into kubeconfig
     new_config_user = remote_config_loaded['users'][0]
