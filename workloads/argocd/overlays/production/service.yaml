@@ -6,7 +6,7 @@ metadata:
     service.beta.kubernetes.io/do-loadbalancer-protocol: "http"
     service.beta.kubernetes.io/do-loadbalancer-size-slug: "lb-small"
     service.beta.kubernetes.io/do-loadbalancer-enable-proxy-protocol: true
-    service.beta.kubernetes.io/do-loadbalancer-name: "personal"
+    service.beta.kubernetes.io/do-loadbalancer-name: "kaede-lb"
     service.beta.kubernetes.io/do-loadbalancer-tls-passthrough: true
     service.beta.kubernetes.io/do-loadbalancer-enable-proxy-protocol: true
 spec:

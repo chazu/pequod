@@ -3,7 +3,7 @@ bootstrap: ## bootstrap the current cluster with workloads
 	script/bootstrap.sh
 
 .PHONY: argo-password
-argo-pasword: ## Get the initial password for argocd
+argo-password: ## Get the initial password for argocd
 	k8sec list -n argocd | grep initial | awk '{print $4}'
 
 .PHONY: update-argocd-password
