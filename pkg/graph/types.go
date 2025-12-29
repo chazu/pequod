@@ -1,6 +1,10 @@
 package graph
 
 import (
+	"encoding/json"
+	"fmt"
+
+	"github.com/cespare/xxhash/v2"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
@@ -143,3 +147,42 @@ const (
 	// ViolationSeverityWarning indicates a non-blocking violation
 	ViolationSeverityWarning ViolationSeverity = "Warning"
 )
+
+// ComputeHash computes a hash of the graph for drift detection
+// This hashes the nodes (excluding metadata) to detect changes
+func (g *Graph) ComputeHash() string {
+	// We only hash the nodes, not the metadata
+	// This way we can detect if the actual resources changed
+	type hashableGraph struct {
+		Nodes      []Node      `json:"nodes"`
+		Violations []Violation `json:"violations"`
+	}
+
+	h := hashableGraph{
+		Nodes:      g.Nodes,
+		Violations: g.Violations,
+	}
+
+	// Use a simple JSON-based hash for now
+	// In production, you might want to use the controller-idioms hash package
+	data, err := json.Marshal(h)
+	if err != nil {
+		return ""
+	}
+
+	// Use xxhash for fast hashing
+	return fmt.Sprintf("%x", xxhash.Sum64(data))
+}
+
+// SetHash computes and sets the RenderHash field
+func (g *Graph) SetHash() {
+	g.Metadata.RenderHash = g.ComputeHash()
+}
+
+// HasChanged returns true if the graph has changed since the last hash
+func (g *Graph) HasChanged(previousHash string) bool {
+	if previousHash == "" {
+		return true // No previous hash means this is new
+	}
+	return g.ComputeHash() != previousHash
+}

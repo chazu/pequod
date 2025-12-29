@@ -47,69 +47,67 @@ type WebServiceSpec struct {
 	// +optional
 	// +kubebuilder:default="embedded"
 	PlatformRef string `json:"platformRef,omitempty"`
+
+	// EnvFrom specifies sources to populate environment variables in the container
+	// This allows referencing existing Secrets and ConfigMaps
+	// +optional
+	EnvFrom []EnvFromSource `json:"envFrom,omitempty"`
+}
+
+// EnvFromSource represents a source for environment variables
+type EnvFromSource struct {
+	// SecretRef references a Secret in the same namespace
+	// +optional
+	SecretRef *SecretReference `json:"secretRef,omitempty"`
+
+	// ConfigMapRef references a ConfigMap in the same namespace
+	// +optional
+	ConfigMapRef *ConfigMapReference `json:"configMapRef,omitempty"`
+}
+
+// SecretReference contains enough information to locate a Secret
+type SecretReference struct {
+	// Name of the Secret
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
+}
+
+// ConfigMapReference contains enough information to locate a ConfigMap
+type ConfigMapReference struct {
+	// Name of the ConfigMap
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
 }
 
 // WebServiceStatus defines the observed state of WebService.
 type WebServiceStatus struct {
+	// ResourceGraphRef references the current ResourceGraph created from this WebService
+	// The ResourceGraph contains the rendered resources and execution state
+	// +optional
+	ResourceGraphRef *ObjectReference `json:"resourceGraphRef,omitempty"`
+
 	// Conditions represent the current state of the WebService resource.
 	// Condition types include:
-	// - "Rendered": Graph artifact created successfully
+	// - "Rendered": ResourceGraph created successfully
 	// - "PolicyPassed": Policy validation succeeded
-	// - "Applying": Resources are being applied
-	// - "Ready": All resources are ready
 	// +listType=map
 	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
-
-	// Inventory tracks all resources managed by this WebService
-	// +optional
-	Inventory []InventoryItem `json:"inventory,omitempty"`
 
 	// ObservedGeneration is the generation observed by the controller
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 }
 
-// InventoryItem represents a single managed resource
-type InventoryItem struct {
-	// NodeID is the identifier of the node in the Graph artifact
-	NodeID string `json:"nodeId"`
-
-	// Group is the API group of the resource
-	// +optional
-	Group string `json:"group,omitempty"`
-
-	// Version is the API version of the resource
-	Version string `json:"version"`
-
-	// Kind is the kind of the resource
-	Kind string `json:"kind"`
-
-	// Namespace is the namespace of the resource (empty for cluster-scoped)
-	// +optional
-	Namespace string `json:"namespace,omitempty"`
-
-	// Name is the name of the resource
-	Name string `json:"name"`
-
-	// UID is the UID of the resource
-	// +optional
-	UID string `json:"uid,omitempty"`
-
-	// Mode indicates how the resource is managed
-	// +kubebuilder:validation:Enum=Managed;Adopted;Orphaned
-	Mode string `json:"mode"`
-
-	// LastAppliedHash is the hash of the last applied configuration
-	// +optional
-	LastAppliedHash string `json:"lastAppliedHash,omitempty"`
-}
-
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:resource:categories=transform
 
 // WebService is the Schema for the webservices API
+// WebService resources should have the label "pequod.io/transform: true" to be managed by the Transform controller
 type WebService struct {
 	metav1.TypeMeta `json:",inline"`
 

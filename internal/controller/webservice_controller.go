@@ -20,17 +20,22 @@ import (
 	"context"
 
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	platformv1alpha1 "github.com/chazu/pequod/api/v1alpha1"
+	"github.com/chazu/pequod/pkg/platformloader"
+	"github.com/chazu/pequod/pkg/reconcile"
 )
 
 // WebServiceReconciler reconciles a WebService object
 type WebServiceReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme     *runtime.Scheme
+	Recorder   record.EventRecorder
+	reconciler *reconcile.Reconciler
 }
 
 // +kubebuilder:rbac:groups=platform.platform.example.com,resources=webservices,verbs=get;list;watch;create;update;patch;delete
@@ -39,23 +44,29 @@ type WebServiceReconciler struct {
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
-// TODO(user): Modify the Reconcile function to compare the state specified by
-// the WebService object against the actual cluster state, and then
-// perform operations to make the cluster state reflect the state specified by
-// the user.
-//
-// For more details, check Reconcile and its Result here:
-// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.22.4/pkg/reconcile
 func (r *WebServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	_ = logf.FromContext(ctx)
+	logger := logf.FromContext(ctx)
+	logger.Info("Reconciling WebService", "name", req.Name, "namespace", req.Namespace)
 
-	// TODO(user): your logic here
-
-	return ctrl.Result{}, nil
+	// Use the handler-based reconciler
+	return r.reconciler.Reconcile(ctx, req)
 }
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *WebServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	// Initialize components
+	loader := platformloader.NewLoader()
+	renderer := platformloader.NewRenderer(loader)
+
+	// Create the handler-based reconciler
+	// Note: Execution is now handled by ResourceGraph controller
+	r.reconciler = reconcile.NewReconciler(
+		r.Client,
+		r.Scheme,
+		renderer,
+	)
+	r.reconciler.SetRecorder(r.Recorder)
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&platformv1alpha1.WebService{}).
 		Named("webservice").

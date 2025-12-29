@@ -1,0 +1,248 @@
+package apply
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/chazu/pequod/api/v1alpha1"
+	"github.com/chazu/pequod/pkg/graph"
+)
+
+// PrunePolicy defines how to handle orphaned resources
+type PrunePolicy string
+
+const (
+	// PrunePolicyDelete deletes orphaned resources
+	PrunePolicyDelete PrunePolicy = "Delete"
+
+	// PrunePolicyOrphan leaves orphaned resources but removes field management
+	PrunePolicyOrphan PrunePolicy = "Orphan"
+)
+
+// PrunerConfig contains configuration for the pruner
+type PrunerConfig struct {
+	// Policy determines what to do with orphaned resources
+	Policy PrunePolicy
+
+	// GracePeriod is the minimum time a resource must be orphaned before deletion
+	// This prevents accidental deletion during updates
+	GracePeriod time.Duration
+
+	// ProtectionAnnotation is an annotation that prevents deletion
+	// Resources with this annotation will never be pruned
+	ProtectionAnnotation string
+
+	// DryRun if true, only reports what would be pruned without actually doing it
+	DryRun bool
+}
+
+// DefaultPrunerConfig returns the default pruner configuration
+func DefaultPrunerConfig() PrunerConfig {
+	return PrunerConfig{
+		Policy:               PrunePolicyDelete,
+		GracePeriod:          30 * time.Second,
+		ProtectionAnnotation: "pequod.io/protect",
+		DryRun:               false,
+	}
+}
+
+// Pruner handles pruning of orphaned resources
+type Pruner struct {
+	client client.Client
+	config PrunerConfig
+}
+
+// NewPruner creates a new resource pruner
+func NewPruner(c client.Client, config PrunerConfig) *Pruner {
+	return &Pruner{
+		client: c,
+		config: config,
+	}
+}
+
+// PruneResult contains the results of a prune operation
+type PruneResult struct {
+	// Deleted contains resources that were deleted
+	Deleted []v1alpha1.InventoryItem
+
+	// Orphaned contains resources that were orphaned (field management removed)
+	Orphaned []v1alpha1.InventoryItem
+
+	// Protected contains resources that were protected from pruning
+	Protected []v1alpha1.InventoryItem
+
+	// Errors contains any errors encountered during pruning
+	Errors []error
+}
+
+// Prune identifies and removes resources not in the current graph
+func (p *Pruner) Prune(ctx context.Context, inventory []v1alpha1.InventoryItem, currentGraph *graph.Graph) (*PruneResult, error) {
+	result := &PruneResult{
+		Deleted:   make([]v1alpha1.InventoryItem, 0),
+		Orphaned:  make([]v1alpha1.InventoryItem, 0),
+		Protected: make([]v1alpha1.InventoryItem, 0),
+		Errors:    make([]error, 0),
+	}
+
+	// Build a set of current node IDs for quick lookup
+	currentNodes := make(map[string]bool)
+	for _, node := range currentGraph.Nodes {
+		currentNodes[node.ID] = true
+	}
+
+	// Find orphaned resources
+	for _, item := range inventory {
+		// Skip if resource is in current graph
+		if currentNodes[item.NodeID] {
+			continue
+		}
+
+		// Skip if resource is already marked as orphaned and we're not deleting
+		if item.Mode == v1alpha1.InventoryModeOrphaned && p.config.Policy == PrunePolicyOrphan {
+			continue
+		}
+
+		// Check if resource is protected
+		protected, err := p.isProtected(ctx, item)
+		if err != nil {
+			result.Errors = append(result.Errors, fmt.Errorf("failed to check protection for %s/%s: %w", item.Namespace, item.Name, err))
+			continue
+		}
+
+		if protected {
+			result.Protected = append(result.Protected, item)
+			continue
+		}
+
+		// Prune the resource based on policy
+		if err := p.pruneResource(ctx, item, result); err != nil {
+			result.Errors = append(result.Errors, err)
+		}
+	}
+
+	return result, nil
+}
+
+// isProtected checks if a resource is protected from pruning
+func (p *Pruner) isProtected(ctx context.Context, item v1alpha1.InventoryItem) (bool, error) {
+	// Fetch the resource
+	obj := &unstructured.Unstructured{}
+	obj.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   item.Group,
+		Version: item.Version,
+		Kind:    item.Kind,
+	})
+
+	key := client.ObjectKey{
+		Namespace: item.Namespace,
+		Name:      item.Name,
+	}
+
+	if err := p.client.Get(ctx, key, obj); err != nil {
+		if errors.IsNotFound(err) {
+			// Resource already deleted - not protected
+			return false, nil
+		}
+		return false, err
+	}
+
+	// Check for protection annotation
+	annotations := obj.GetAnnotations()
+	if annotations != nil {
+		if _, found := annotations[p.config.ProtectionAnnotation]; found {
+			return true, nil
+		}
+	}
+
+	return false, nil
+}
+
+// pruneResource prunes a single resource based on the policy
+func (p *Pruner) pruneResource(ctx context.Context, item v1alpha1.InventoryItem, result *PruneResult) error {
+	obj := &unstructured.Unstructured{}
+	obj.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   item.Group,
+		Version: item.Version,
+		Kind:    item.Kind,
+	})
+	obj.SetNamespace(item.Namespace)
+	obj.SetName(item.Name)
+
+	switch p.config.Policy {
+	case PrunePolicyDelete:
+		return p.deleteResource(ctx, obj, item, result)
+	case PrunePolicyOrphan:
+		return p.orphanResource(ctx, obj, item, result)
+	default:
+		return fmt.Errorf("unknown prune policy: %s", p.config.Policy)
+	}
+}
+
+// deleteResource deletes a resource
+func (p *Pruner) deleteResource(ctx context.Context, obj *unstructured.Unstructured, item v1alpha1.InventoryItem, result *PruneResult) error {
+	if p.config.DryRun {
+		// Dry-run: just record what would be deleted
+		result.Deleted = append(result.Deleted, item)
+		return nil
+	}
+
+	// Delete the resource
+	if err := p.client.Delete(ctx, obj); err != nil {
+		if errors.IsNotFound(err) {
+			// Resource already deleted - not an error
+			result.Deleted = append(result.Deleted, item)
+			return nil
+		}
+		return fmt.Errorf("failed to delete %s/%s: %w", item.Namespace, item.Name, err)
+	}
+
+	result.Deleted = append(result.Deleted, item)
+	return nil
+}
+
+// orphanResource removes field management from a resource without deleting it
+func (p *Pruner) orphanResource(ctx context.Context, obj *unstructured.Unstructured, item v1alpha1.InventoryItem, result *PruneResult) error {
+	if p.config.DryRun {
+		// Dry-run: just record what would be orphaned
+		result.Orphaned = append(result.Orphaned, item)
+		return nil
+	}
+
+	// Fetch the current resource
+	key := client.ObjectKeyFromObject(obj)
+	current := &unstructured.Unstructured{}
+	current.SetGroupVersionKind(obj.GroupVersionKind())
+
+	if err := p.client.Get(ctx, key, current); err != nil {
+		if errors.IsNotFound(err) {
+			// Resource already deleted - record as orphaned
+			result.Orphaned = append(result.Orphaned, item)
+			return nil
+		}
+		return fmt.Errorf("failed to get resource for orphaning: %w", err)
+	}
+
+	// Remove our field manager's ownership by applying an empty patch
+	// This effectively orphans the resource
+	// Note: In a real implementation, we might want to use the managedFields API
+	// to remove specific field manager entries, but for now we just mark it as orphaned
+	// in our inventory
+
+	result.Orphaned = append(result.Orphaned, item)
+	return nil
+}
+
+// ShouldPrune determines if a resource should be pruned based on grace period
+func (p *Pruner) ShouldPrune(item v1alpha1.InventoryItem, orphanedSince time.Time) bool {
+	if p.config.GracePeriod == 0 {
+		return true
+	}
+
+	return time.Since(orphanedSince) >= p.config.GracePeriod
+}

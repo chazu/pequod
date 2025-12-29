@@ -39,6 +39,36 @@ spec:
           spec:
             description: spec defines the desired state of WebService
             properties:
+              envFrom:
+                description: |-
+                  EnvFrom specifies sources to populate environment variables in the container
+                  This allows referencing existing Secrets and ConfigMaps
+                items:
+                  description: EnvFromSource represents a source for environment variables
+                  properties:
+                    configMapRef:
+                      description: ConfigMapRef references a ConfigMap in the same
+                        namespace
+                      properties:
+                        name:
+                          description: Name of the ConfigMap
+                          minLength: 1
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    secretRef:
+                      description: SecretRef references a Secret in the same namespace
+                      properties:
+                        name:
+                          description: Name of the Secret
+                          minLength: 1
+                          type: string
+                      required:
+                      - name
+                      type: object
+                  type: object
+                type: array
               image:
                 description: Image is the container image to deploy
                 minLength: 1
@@ -73,10 +103,8 @@ spec:
                 description: |-
                   Conditions represent the current state of the WebService resource.
                   Condition types include:
-                  - "Rendered": Graph artifact created successfully
+                  - "Rendered": ResourceGraph created successfully
                   - "PolicyPassed": Policy validation succeeded
-                  - "Applying": Resources are being applied
-                  - "Ready": All resources are ready
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -135,58 +163,36 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
-              inventory:
-                description: Inventory tracks all resources managed by this WebService
-                items:
-                  description: InventoryItem represents a single managed resource
-                  properties:
-                    group:
-                      description: Group is the API group of the resource
-                      type: string
-                    kind:
-                      description: Kind is the kind of the resource
-                      type: string
-                    lastAppliedHash:
-                      description: LastAppliedHash is the hash of the last applied
-                        configuration
-                      type: string
-                    mode:
-                      description: Mode indicates how the resource is managed
-                      enum:
-                      - Managed
-                      - Adopted
-                      - Orphaned
-                      type: string
-                    name:
-                      description: Name is the name of the resource
-                      type: string
-                    namespace:
-                      description: Namespace is the namespace of the resource (empty
-                        for cluster-scoped)
-                      type: string
-                    nodeId:
-                      description: NodeID is the identifier of the node in the Graph
-                        artifact
-                      type: string
-                    uid:
-                      description: UID is the UID of the resource
-                      type: string
-                    version:
-                      description: Version is the API version of the resource
-                      type: string
-                  required:
-                  - kind
-                  - mode
-                  - name
-                  - nodeId
-                  - version
-                  type: object
-                type: array
               observedGeneration:
                 description: ObservedGeneration is the generation observed by the
                   controller
                 format: int64
                 type: integer
+              resourceGraphRef:
+                description: |-
+                  ResourceGraphRef references the current ResourceGraph created from this WebService
+                  The ResourceGraph contains the rendered resources and execution state
+                properties:
+                  apiVersion:
+                    description: APIVersion of the referent
+                    type: string
+                  kind:
+                    description: Kind of the referent
+                    type: string
+                  name:
+                    description: Name of the referent
+                    type: string
+                  namespace:
+                    description: Namespace of the referent (empty for cluster-scoped)
+                    type: string
+                  uid:
+                    description: UID of the referent
+                    type: string
+                required:
+                - apiVersion
+                - kind
+                - name
+                type: object
             type: object
         required:
         - spec

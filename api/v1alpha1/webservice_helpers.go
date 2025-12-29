@@ -21,17 +21,6 @@ import (
 )
 
 const (
-	// InventoryModeManaged indicates the resource is managed by the operator
-	InventoryModeManaged = "Managed"
-
-	// InventoryModeAdopted indicates the resource was adopted from existing resources
-	InventoryModeAdopted = "Adopted"
-
-	// InventoryModeOrphaned indicates the resource is no longer in the graph
-	InventoryModeOrphaned = "Orphaned"
-)
-
-const (
 	// ConditionTypeRendered indicates the graph artifact has been rendered
 	ConditionTypeRendered = "Rendered"
 
@@ -45,40 +34,7 @@ const (
 	ConditionTypeReady = "Ready"
 )
 
-// AddInventoryItem adds or updates an inventory item
-func (ws *WebService) AddInventoryItem(item InventoryItem) {
-	// Check if item already exists
-	for i, existing := range ws.Status.Inventory {
-		if existing.NodeID == item.NodeID {
-			// Update existing item
-			ws.Status.Inventory[i] = item
-			return
-		}
-	}
 
-	// Add new item
-	ws.Status.Inventory = append(ws.Status.Inventory, item)
-}
-
-// RemoveInventoryItem removes an inventory item by node ID
-func (ws *WebService) RemoveInventoryItem(nodeID string) {
-	for i, item := range ws.Status.Inventory {
-		if item.NodeID == nodeID {
-			ws.Status.Inventory = append(ws.Status.Inventory[:i], ws.Status.Inventory[i+1:]...)
-			return
-		}
-	}
-}
-
-// GetInventoryItem retrieves an inventory item by node ID
-func (ws *WebService) GetInventoryItem(nodeID string) *InventoryItem {
-	for _, item := range ws.Status.Inventory {
-		if item.NodeID == nodeID {
-			return &item
-		}
-	}
-	return nil
-}
 
 // SetCondition sets or updates a condition
 func (ws *WebService) SetCondition(conditionType string, status metav1.ConditionStatus, reason, message string) {
@@ -118,26 +74,35 @@ func (ws *WebService) GetCondition(conditionType string) *metav1.Condition {
 	return nil
 }
 
+// FindStatusCondition retrieves a condition by type (alias for GetCondition for pause package compatibility)
+func (ws *WebService) FindStatusCondition(conditionType string) *metav1.Condition {
+	return ws.GetCondition(conditionType)
+}
+
+// RemoveStatusCondition removes a condition by type
+func (ws *WebService) RemoveStatusCondition(conditionType string) {
+	for i, cond := range ws.Status.Conditions {
+		if cond.Type == conditionType {
+			ws.Status.Conditions = append(ws.Status.Conditions[:i], ws.Status.Conditions[i+1:]...)
+			return
+		}
+	}
+}
+
+// SetStatusCondition sets a condition (for pause package compatibility)
+func (ws *WebService) SetStatusCondition(condition metav1.Condition) {
+	ws.SetCondition(condition.Type, condition.Status, condition.Reason, condition.Message)
+}
+
+// GetStatusConditions returns a pointer to the conditions slice (for pause package compatibility)
+func (ws *WebService) GetStatusConditions() *[]metav1.Condition {
+	return &ws.Status.Conditions
+}
+
 // IsReady returns true if the Ready condition is True
 func (ws *WebService) IsReady() bool {
 	cond := ws.GetCondition(ConditionTypeReady)
 	return cond != nil && cond.Status == metav1.ConditionTrue
 }
 
-// MarkOrphaned marks all inventory items as orphaned
-func (ws *WebService) MarkOrphaned() {
-	for i := range ws.Status.Inventory {
-		ws.Status.Inventory[i].Mode = InventoryModeOrphaned
-	}
-}
 
-// GetOrphanedItems returns all orphaned inventory items
-func (ws *WebService) GetOrphanedItems() []InventoryItem {
-	var orphaned []InventoryItem
-	for _, item := range ws.Status.Inventory {
-		if item.Mode == InventoryModeOrphaned {
-			orphaned = append(orphaned, item)
-		}
-	}
-	return orphaned
-}

@@ -25,14 +25,18 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	platformv1alpha1 "github.com/chazu/pequod/api/v1alpha1"
+	"github.com/chazu/pequod/pkg/platformloader"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -83,6 +87,57 @@ var _ = BeforeSuite(func() {
 	k8sClient, err = client.New(cfg, client.Options{Scheme: scheme.Scheme})
 	Expect(err).NotTo(HaveOccurred())
 	Expect(k8sClient).NotTo(BeNil())
+
+	// Start the manager with the WebServiceReconciler
+	By("setting up the manager")
+	k8sManager, err := ctrl.NewManager(cfg, ctrl.Options{
+		Scheme: scheme.Scheme,
+		Metrics: metricsserver.Options{
+			BindAddress: "0", // Disable metrics server in tests
+		},
+	})
+	Expect(err).ToNot(HaveOccurred())
+
+	// WebService controller is deprecated - using Transform controller instead
+	// Uncomment to test old WebService controller
+	// err = (&WebServiceReconciler{
+	// 	Client:   k8sManager.GetClient(),
+	// 	Scheme:   k8sManager.GetScheme(),
+	// 	Recorder: k8sManager.GetEventRecorderFor("webservice-controller"),
+	// }).SetupWithManager(k8sManager)
+	// Expect(err).ToNot(HaveOccurred())
+
+	err = (&ResourceGraphReconciler{
+		Client: k8sManager.GetClient(),
+		Scheme: k8sManager.GetScheme(),
+	}).SetupWithManager(k8sManager)
+	Expect(err).ToNot(HaveOccurred())
+
+	// Setup Transform controller
+	loader := platformloader.NewLoader()
+	renderer := platformloader.NewRenderer(loader)
+	transformGVKs := []schema.GroupVersionKind{
+		{
+			Group:   "platform.platform.example.com",
+			Version: "v1alpha1",
+			Kind:    "WebService",
+		},
+	}
+
+	err = (&TransformReconciler{
+		Client:         k8sManager.GetClient(),
+		Scheme:         k8sManager.GetScheme(),
+		PlatformLoader: loader,
+		Renderer:       renderer,
+		Recorder:       k8sManager.GetEventRecorderFor("transform-controller"),
+	}).SetupWithManager(k8sManager, transformGVKs)
+	Expect(err).ToNot(HaveOccurred())
+
+	go func() {
+		defer GinkgoRecover()
+		err = k8sManager.Start(ctx)
+		Expect(err).ToNot(HaveOccurred(), "failed to run manager")
+	}()
 })
 
 var _ = AfterSuite(func() {
