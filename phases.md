@@ -115,33 +115,96 @@ This document breaks down the development of the platform operator into small, s
 
 ---
 
-## Phase 1: Core Types and CRD (Week 2)
+## 🎯 ARCHITECTURE OVERVIEW - READ THIS FIRST!
 
-**Goal**: Define WebService CRD and Graph artifact types.
+**Critical Concept**: Pequod uses a **single Transform CRD** for all platform types. Platform definitions (Database, Queue, WebService, etc.) are **CUE artifacts** - NOT separate CRDs.
 
-### Task 1.1: Create WebService CRD
-**Deliverable**: WebService API definition
+### The Transform Pattern
+```yaml
+apiVersion: platform.pequod.io/v1alpha1
+kind: Transform  # ← ONE CRD for everything!
+spec:
+  cueRef:
+    type: oci  # or git, configmap, inline
+    ref: "ghcr.io/acme/platforms/postgres:v2.1.0"
+  input:  # Free-form, validated by CUE
+    name: "mydb"
+    size: "large"
+```
 
-- [ ] Run: `kubebuilder create api --group platform --version v1alpha1 --kind WebService`
-- [ ] Define `WebServiceSpec` with initial fields:
-  - `image`: Container image
-  - `replicas`: Number of replicas (optional, default from policy)
-  - `port`: Service port
-  - `platformRef`: Reference to platform module (embedded version only for now)
-- [ ] Define `WebServiceStatus` with conditions:
-  - `Rendered`: Graph artifact created
-  - `PolicyPassed`: Policy validation succeeded
-  - `Applying`: Resources being applied
-  - `Ready`: All resources ready
+### Two Controllers
+1. **Transform Controller**: Fetches CUE → Renders Graph → Creates ResourceGraph
+2. **ResourceGraph Controller**: Executes DAG → Applies resources → Checks readiness
+
+### Why?
+- ✅ No per-type CRDs needed
+- ✅ Platform definitions are external artifacts
+- ✅ Add new types without code changes
+- ✅ Completely decoupled
+
+### RBAC Note
+ResourceGraph controller needs broad permissions (`apiGroups: ["*"]`) because it creates arbitrary resources. Security boundary is CUE validation, not RBAC.
+
+---
+
+## Phase 1: Core Types and CRDs (Week 2)
+
+**Goal**: Define Transform and ResourceGraph CRDs and Graph artifact types.
+
+### Task 1.1: Create Transform CRD
+**Deliverable**: Transform API definition (the ONLY user-facing CRD for platform types)
+
+- [ ] Run: `kubebuilder create api --group platform --version v1alpha1 --kind Transform`
+- [ ] Define `TransformSpec`:
+  - `cueRef`: Reference to CUE platform definition
+    - `type`: string (oci, git, configmap, inline)
+    - `ref`: string (OCI image, git URL, configmap name, or inline CUE)
+    - `path`: string (optional, path within CUE module)
+    - `pullSecretRef`: LocalObjectReference (optional, for private OCI/Git)
+  - `input`: runtime.RawExtension (free-form input data, validated by CUE)
+  - `policies`: []PolicyOverride (optional, override default policies)
+- [ ] Define `TransformStatus`:
+  - `resourceGraphRef`: ObjectReference (reference to created ResourceGraph)
+  - `resolvedCueRef`: ResolvedCueReference (digest, fetchedAt)
+  - `conditions`: []metav1.Condition
+    - `Validated`: Input validated against CUE schema
+    - `Rendered`: ResourceGraph created
+  - `observedGeneration`: int64
 - [ ] Add status subresource
 - [ ] Generate CRD manifests: `make manifests`
 
 **Acceptance Criteria**:
-- CRD YAML generated in `config/crd/bases/`
+- Transform CRD YAML generated in `config/crd/bases/`
 - API types compile without errors
 - `make manifests` succeeds
 
-### Task 1.2: Define Graph Artifact Types
+**Note**: This is the ONLY CRD users interact with. No Database CRD, Queue CRD, etc. Platform types are defined in CUE artifacts, not CRDs.
+
+### Task 1.2: Create ResourceGraph CRD
+**Deliverable**: ResourceGraph API definition (internal execution tracking)
+
+- [ ] Run: `kubebuilder create api --group platform --version v1alpha1 --kind ResourceGraph`
+- [ ] Define `ResourceGraphSpec`:
+  - `sourceRef`: ObjectReference (reference to Transform that created this)
+  - `metadata`: GraphMetadata (name, version, platformRef, renderHash, renderedAt)
+  - `nodes`: []ResourceNode (rendered resources with dependencies)
+  - `violations`: []PolicyViolation (policy validation results)
+- [ ] Define `ResourceGraphStatus`:
+  - `phase`: string (Pending, Executing, Ready, Failed)
+  - `nodeStatus`: map[string]NodeExecutionStatus (per-node execution state)
+  - `conditions`: []metav1.Condition
+  - `observedGeneration`: int64
+- [ ] Add status subresource
+- [ ] Generate CRD manifests: `make manifests`
+
+**Acceptance Criteria**:
+- ResourceGraph CRD YAML generated
+- API types compile without errors
+- `make manifests` succeeds
+
+**Note**: ResourceGraph is an internal CRD for execution tracking. Users don't create these directly.
+
+### Task 1.3: Define Graph Artifact Types
 **Deliverable**: Internal types for Graph representation
 
 - [ ] Create `pkg/graph/types.go` with:
@@ -158,7 +221,7 @@ This document breaks down the development of the platform operator into small, s
 - JSON marshaling/unmarshaling works
 - Unit tests pass with >80% coverage
 
-### Task 1.3: Define Readiness Predicate Types
+### Task 1.4: Define Readiness Predicate Types
 **Deliverable**: Readiness predicate implementations
 
 - [ ] Create `pkg/readiness/predicates.go` with:
@@ -173,57 +236,52 @@ This document breaks down the development of the platform operator into small, s
 - Unit tests cover success and failure cases
 - Predicates work with unstructured.Unstructured objects
 
-### Task 1.4: Add Inventory Types to Status
-**Deliverable**: Inventory tracking in WebService status
-
-- [ ] Add `Inventory` field to `WebServiceStatus`:
-  - `nodeId`: string
-  - `gvk`: GroupVersionKind
-  - `namespace`, `name`, `uid`: string
-  - `mode`: Managed | Adopted | Orphaned
-  - `lastAppliedHash`: string
-- [ ] Add helper functions for inventory management
-- [ ] Update CRD manifests: `make manifests`
-
-**Acceptance Criteria**:
-- Status includes inventory array
-- CRD updated with new fields
-- Helper functions tested
-
 ---
 
 ## Phase 2: CUE Integration (Week 3)
 
 **Goal**: Implement CUE module loading and evaluation to produce Graph artifacts.
 
-### Task 2.1: Create Embedded CUE Module Structure
-**Deliverable**: Initial platform module for WebService
+### Task 2.1: Create Example CUE Platform Modules
+**Deliverable**: Example platform modules for testing (embedded for now)
 
 - [ ] Create `cue/platform/webservice/schema.cue`:
-  - Define `#WebServiceSpec` schema matching Go types
+  - Define `#Input` schema (name, image, port, replicas, etc.)
   - Add basic constraints (required fields, validation)
 - [ ] Create `cue/platform/webservice/render.cue`:
   - Template for Deployment
   - Template for Service
-  - Basic graph structure with nodes and dependencies
-- [ ] Create `cue/platform/policy/input.cue`:
-  - Example input policies (image registry, resource limits)
+  - Graph structure with nodes and dependencies
+- [ ] Create `cue/platform/database/schema.cue`:
+  - Define `#Input` schema (name, engine, size, replicas, backup, etc.)
+  - Add constraints
+- [ ] Create `cue/platform/database/render.cue`:
+  - Template for StatefulSet
+  - Template for Service
+  - Template for PVC
+  - Graph structure with nodes and dependencies
+- [ ] Create `cue/platform/policy/defaults.cue`:
+  - Example policies (image registry, resource limits, security)
 - [ ] Test CUE evaluation manually: `cue eval ./cue/platform/...`
 
 **Acceptance Criteria**:
 - CUE files are valid and evaluate without errors
-- Schema matches Go WebServiceSpec
-- Can produce a simple Deployment + Service
+- Each platform module has schema and render files
+- Can produce complete Graph artifacts
+- Policies can be applied to any platform type
 
-### Task 2.2: Implement CUE Loader
+**Note**: These are EXAMPLES for testing. Real platform modules will be fetched from OCI/Git (Phase 9).
+
+### Task 2.2: Implement CUE Loader (Embedded Only for Now)
 **Deliverable**: Go package to load and evaluate CUE modules
 
 - [ ] Create `pkg/platformloader/loader.go`:
-  - `LoadEmbedded(version string) (*cue.Value, error)`
+  - `LoadEmbedded(platformType string) ([]byte, error)` - Load embedded CUE
+  - `Load(ctx, cueRef CueReference) ([]byte, string, error)` - Generic loader (stub for now)
   - Embed CUE files using `//go:embed`
   - Use `cuelang.org/go/cue/cuecontext` for evaluation
 - [ ] Create `pkg/platformloader/cache.go`:
-  - Simple in-memory cache keyed by version
+  - Simple in-memory cache keyed by digest
   - Thread-safe access with sync.RWMutex
 - [ ] Add unit tests with sample CUE content
 
@@ -231,12 +289,16 @@ This document breaks down the development of the platform operator into small, s
 - Can load embedded CUE modules
 - Cache prevents redundant evaluations
 - Unit tests pass
+- Loader interface ready for OCI/Git implementation (Phase 9)
+
+**Note**: For now, only embedded CUE works. OCI/Git/ConfigMap fetching comes in Phase 9.
 
 ### Task 2.3: Implement Graph Renderer
 **Deliverable**: Convert CUE evaluation to Graph artifact
 
 - [ ] Create `pkg/platformloader/renderer.go`:
-  - `Render(ctx, cueValue, webServiceSpec) (*graph.Graph, error)`
+  - `Render(ctx, cueModule []byte, input runtime.RawExtension) (*graph.Graph, error)`
+  - Evaluate CUE with input data
   - Extract nodes from CUE output
   - Parse dependencies and readiness predicates
   - Convert CUE objects to unstructured.Unstructured
@@ -246,7 +308,10 @@ This document breaks down the development of the platform operator into small, s
 **Acceptance Criteria**:
 - CUE evaluation produces valid Graph
 - All node fields populated correctly
+- Works with any CUE module (webservice, database, etc.)
 - Golden file tests pass
+
+**Note**: Renderer is generic - it doesn't know about specific platform types.
 
 ### Task 2.4: Implement Policy Evaluation
 **Deliverable**: Validate inputs and outputs against CUE policies
@@ -305,18 +370,22 @@ This document breaks down the development of the platform operator into small, s
 
 - [ ] Create `pkg/graph/executor.go`:
   - `Execute(ctx, dag, applier, readinessChecker) error`
+  - Use `github.com/sourcegraph/conc` for worker pool
   - Identify nodes with satisfied dependencies
-  - Apply nodes in parallel where possible
+  - Apply nodes in parallel where possible (configurable max goroutines)
   - Wait for readiness before marking complete
   - Handle errors and propagate to dependents
+  - Retry failed nodes with exponential backoff
 - [ ] Add execution metrics (nodes applied, time per node)
 - [ ] Add comprehensive unit tests
 
 **Acceptance Criteria**:
 - Nodes applied in correct order
-- Parallel execution where possible
-- Errors handled gracefully
+- Parallel execution where possible with bounded concurrency
+- Errors handled gracefully (continue independent nodes, block dependents)
+- Retry logic with exponential backoff
 - Metrics collected
+- Panics caught and propagated safely
 
 ### Task 3.4: Implement Readiness Checker
 **Deliverable**: Evaluate readiness predicates for applied resources
@@ -409,84 +478,92 @@ This document breaks down the development of the platform operator into small, s
 
 ## Phase 5: Controller Implementation (Week 6-7)
 
-**Goal**: Implement WebService controller with full reconciliation loop.
+**Goal**: Implement Transform and ResourceGraph controllers with full reconciliation loop.
 
-### Task 5.1: Implement Basic Reconciler
-**Deliverable**: WebService controller scaffold
+### Task 5.1: Implement Transform Controller
+**Deliverable**: Transform controller (rendering only)
 
-- [ ] Create controller: `kubebuilder create controller --group platform --version v1alpha1 --kind WebService`
-- [ ] Implement basic reconciliation loop:
-  - Fetch WebService resource
-  - Update status conditions
+- [ ] Create controller: `kubebuilder create controller --group platform --version v1alpha1 --kind Transform`
+- [ ] Implement reconciliation loop:
+  - Fetch Transform resource
+  - Fetch CUE module from `spec.cueRef` (embedded only for now)
+  - Render Graph from CUE + input
+  - Validate policies
+  - Create/update ResourceGraph CR
+  - Update Transform status with ResourceGraph reference
   - Handle deletion (finalizer)
-- [ ] Add RBAC markers for required permissions
+- [ ] Add RBAC markers:
+  - Read/write Transform
+  - Create/update ResourceGraph
 - [ ] Generate RBAC manifests: `make manifests`
 
 **Acceptance Criteria**:
-- Controller reconciles WebService resources
-- Status conditions updated
+- Controller reconciles Transform resources
+- ResourceGraph created from rendered Graph
+- Transform status updated with ResourceGraph reference
 - RBAC manifests generated
 
-### Task 5.2: Integrate CUE Rendering
-**Deliverable**: Controller renders Graph from WebService
+**Note**: Transform controller ONLY renders. It does NOT apply resources. That's ResourceGraph controller's job.
 
-- [ ] Add platform loader to reconciler
-- [ ] Load embedded CUE module based on `spec.platformRef`
-- [ ] Render Graph artifact from WebService spec
-- [ ] Update status with render hash and platform ref
-- [ ] Set `Rendered` condition
+### Task 5.2: Implement ResourceGraph Controller
+**Deliverable**: ResourceGraph controller (execution only)
+
+- [ ] Create controller: `kubebuilder create controller --group platform --version v1alpha1 --kind ResourceGraph`
+- [ ] Implement reconciliation loop:
+  - Fetch ResourceGraph resource
+  - Build DAG from nodes
+  - Execute DAG with SSA applier
+  - Check readiness for each node
+  - Update ResourceGraph status with execution state
+  - Handle deletion (finalizer)
+- [ ] Add RBAC markers:
+  - Read/write ResourceGraph
+  - **Broad permissions**: Create/update/delete ANY resource type (apiGroups: ["*"], resources: ["*"])
+- [ ] Generate RBAC manifests: `make manifests`
 
 **Acceptance Criteria**:
-- Graph rendered successfully
-- Status includes render hash
-- `Rendered` condition set to True on success
+- Controller reconciles ResourceGraph resources
+- Resources applied in dependency order
+- Readiness checked for each node
+- ResourceGraph status updated with execution state
+- RBAC includes broad permissions for resource creation
+
+**Note**: ResourceGraph controller needs broad RBAC because it creates arbitrary resources defined in CUE.
 
 ### Task 5.3: Integrate Policy Validation
-**Deliverable**: Controller validates policies
+**Deliverable**: Policy validation in Transform controller
 
-- [ ] Add policy evaluation to reconciliation
-- [ ] Validate input (WebService spec)
-- [ ] Validate output (rendered Graph)
-- [ ] Update status with violations
-- [ ] Set `PolicyPassed` condition
-- [ ] Stop reconciliation if policy fails
+- [ ] Add policy evaluation to Transform reconciliation
+- [ ] Validate input against CUE schema
+- [ ] Validate rendered Graph against policies
+- [ ] Update Transform status with violations
+- [ ] Set `Validated` condition
+- [ ] Stop reconciliation if validation fails (don't create ResourceGraph)
 
 **Acceptance Criteria**:
 - Policy violations detected
-- Status includes structured violations
-- Reconciliation stops on policy failure
+- Transform status includes structured violations
+- Reconciliation stops on validation failure
+- No ResourceGraph created if validation fails
 
-### Task 5.4: Integrate DAG Execution
-**Deliverable**: Controller applies resources via DAG executor
+### Task 5.4: Implement Finalizer Logic
+**Deliverable**: Clean up on deletion
 
-- [ ] Add DAG executor to reconciler
-- [ ] Build DAG from Graph artifact
-- [ ] Execute DAG with SSA applier
-- [ ] Update inventory in status
-- [ ] Set `Applying` and `Ready` conditions
-- [ ] Handle partial failures gracefully
-
-**Acceptance Criteria**:
-- Resources applied in dependency order
-- Inventory tracked in status
-- Conditions reflect execution state
-- Partial failures don't crash controller
-
-### Task 5.5: Implement Finalizer Logic
-**Deliverable**: Clean up resources on WebService deletion
-
-- [ ] Add finalizer to WebService on creation
-- [ ] Implement deletion logic:
-  - Respect deletion policy (Delete vs Orphan)
-  - Delete managed resources or mark orphaned
+- [ ] Add finalizer to Transform on creation
+- [ ] Implement Transform deletion logic:
+  - ResourceGraph deleted automatically via OwnerReference
+  - Remove finalizer when cleanup complete
+- [ ] Add finalizer to ResourceGraph on creation
+- [ ] Implement ResourceGraph deletion logic:
+  - Delete managed resources (respect deletion policy)
   - Remove finalizer when cleanup complete
 - [ ] Add unit tests for deletion scenarios
 
 **Acceptance Criteria**:
-- Finalizer added on creation
+- Finalizers added on creation
 - Resources cleaned up on deletion
-- Finalizer removed after cleanup
-- Orphan mode works correctly
+- Finalizers removed after cleanup
+- OwnerReference cascade works correctly
 
 ---
 
@@ -512,11 +589,20 @@ This document breaks down the development of the platform operator into small, s
 ### Task 6.2: Controller Integration Tests
 **Deliverable**: envtest-based controller tests
 
-- [ ] Create `controllers/webservice_controller_test.go`
-- [ ] Test basic reconciliation flow
-- [ ] Test policy validation (pass and fail)
-- [ ] Test resource application
-- [ ] Test deletion and cleanup
+- [ ] Create `controllers/transform_controller_test.go`
+- [ ] Test Transform reconciliation:
+  - CUE fetching (embedded)
+  - Graph rendering
+  - Policy validation (pass and fail)
+  - ResourceGraph creation
+  - Status updates
+- [ ] Create `controllers/resourcegraph_controller_test.go`
+- [ ] Test ResourceGraph reconciliation:
+  - DAG building
+  - Resource application
+  - Readiness checking
+  - Status updates
+- [ ] Test deletion and cleanup for both
 - [ ] Test error handling and retries
 
 **Acceptance Criteria**:
@@ -527,30 +613,37 @@ This document breaks down the development of the platform operator into small, s
 ### Task 6.3: End-to-End Tests
 **Deliverable**: E2E tests on real cluster
 
-- [ ] Create `test/e2e/webservice_test.go`
+- [ ] Create `test/e2e/transform_test.go`
 - [ ] Set up kind cluster in CI
-- [ ] Test complete WebService lifecycle:
-  - Create WebService
+- [ ] Test complete Transform lifecycle:
+  - Create Transform (webservice type)
+  - Verify ResourceGraph created
   - Verify Deployment and Service created
   - Verify readiness
-  - Update WebService
+  - Update Transform
   - Verify update applied
-  - Delete WebService
-  - Verify cleanup
+  - Delete Transform
+  - Verify cleanup (ResourceGraph + resources)
+- [ ] Test with multiple platform types (webservice, database)
 - [ ] Add test for policy violations
 
 **Acceptance Criteria**:
 - E2E tests run on kind cluster
 - Full lifecycle tested
+- Multiple platform types tested
 - Tests pass in CI
 
 ### Task 6.4: Create Sample Resources
-**Deliverable**: Example WebService manifests
+**Deliverable**: Example Transform manifests
 
-- [ ] Create `config/samples/platform_v1alpha1_webservice.yaml`:
-  - Simple web service example
+- [ ] Create `config/samples/platform_v1alpha1_transform_webservice.yaml`:
+  - Simple web service Transform
+  - Uses embedded CUE (type: inline or embedded)
   - Documented with comments
-- [ ] Create `config/samples/webservice-with-policy-violation.yaml`:
+- [ ] Create `config/samples/platform_v1alpha1_transform_database.yaml`:
+  - Database Transform example
+  - Shows different platform type
+- [ ] Create `config/samples/transform-with-policy-violation.yaml`:
   - Example that fails policy
 - [ ] Test samples against running operator
 
@@ -558,6 +651,7 @@ This document breaks down the development of the platform operator into small, s
 - Samples are valid YAML
 - Samples work with operator
 - Samples documented
+- Multiple platform types shown
 
 ---
 
@@ -584,17 +678,20 @@ This document breaks down the development of the platform operator into small, s
 ### Task 7.2: Implement Graph Artifact Storage
 **Deliverable**: Store rendered Graph for debugging
 
-- [ ] Create ConfigMap for Graph artifact
-- [ ] Store Graph as JSON in ConfigMap
-- [ ] Reference ConfigMap name in status
-- [ ] Add cleanup logic for old ConfigMaps
+- [ ] Create Graph CRD for storing rendered graph artifacts
+- [ ] Store Graph as a custom resource with per-node execution state
+- [ ] Reference Graph resource name in WebService status
+- [ ] Add cleanup logic for old Graph resources
 - [ ] Add size limits and warnings
 
 **Acceptance Criteria**:
-- Graph stored in ConfigMap
-- ConfigMap referenced in status
-- Old ConfigMaps cleaned up
+- Graph stored as CRD (not ConfigMap)
+- Graph resource referenced in WebService status
+- Per-node execution state tracked in Graph resource
+- Old Graph resources cleaned up
 - Size limits enforced
+
+**Note**: Using a CRD instead of ConfigMap for better type safety, validation, and observability.
 
 ### Task 7.3: Add Comprehensive Metrics
 **Deliverable**: Prometheus metrics for all operations
@@ -638,22 +735,25 @@ This document breaks down the development of the platform operator into small, s
 
 ## Phase 8: Advanced Features - Adoption (Week 9-10)
 
-**Goal**: Support adopting existing resources.
+**Goal**: Support adopting existing resources into Transform management.
 
 ### Task 8.1: Add Adoption API
 **Deliverable**: API for specifying resources to adopt
 
-- [ ] Add to `WebServiceSpec`:
+- [ ] Add to `TransformSpec`:
   - `adopt.resources[]` with GVK, namespace, name
   - `adopt.mode`: Explicit (default) or LabelSelector (future)
+  - `adopt.strategy`: TakeOwnership (default) or Mirror
 - [ ] Add validation for adoption spec
 - [ ] Update CRD manifests
 - [ ] Document adoption in API comments
 
 **Acceptance Criteria**:
-- Adoption spec in CRD
+- Adoption spec in Transform CRD
 - Validation prevents invalid adoption specs
 - API documented
+
+**Note**: Adoption allows Transforms to take ownership of existing resources (e.g., migrating from Helm to Pequod).
 
 ### Task 8.2: Implement Adoption Logic
 **Deliverable**: Adopt existing resources into management
@@ -662,8 +762,8 @@ This document breaks down the development of the platform operator into small, s
   - `Adopt(ctx, client, adoptSpec, node) error`
   - Fetch existing resource
   - Verify identity matches node target
-  - SSA apply with field manager
-  - Mark inventory item as Adopted
+  - SSA apply with field manager (pequod)
+  - Add to ResourceGraph node status as Adopted
 - [ ] Add safety checks (field manager conflicts)
 - [ ] Add dry-run mode
 - [ ] Add unit tests
@@ -671,17 +771,23 @@ This document breaks down the development of the platform operator into small, s
 **Acceptance Criteria**:
 - Existing resources can be adopted
 - Field manager conflicts detected
-- Inventory marked as Adopted
+- ResourceGraph node status shows Adopted
 - Dry-run shows what would be adopted
 
-### Task 8.3: Integrate Adoption into Reconciler
-**Deliverable**: Controller supports adoption workflow
+### Task 8.3: Integrate Adoption into ResourceGraph Controller
+**Deliverable**: ResourceGraph controller supports adoption workflow
 
-- [ ] Add adoption phase to reconciliation
+- [ ] Add adoption phase to ResourceGraph reconciliation
 - [ ] Run adoption before normal DAG execution
-- [ ] Update status with adoption results
+- [ ] Update ResourceGraph status with adoption results
 - [ ] Add events for adopted resources
 - [ ] Handle adoption failures gracefully
+
+**Acceptance Criteria**:
+- Adoption runs before DAG execution
+- ResourceGraph status shows adopted resources
+- Events emitted for adoptions
+- Failures don't block other resources
 
 **Acceptance Criteria**:
 - Adoption runs before apply
@@ -693,9 +799,9 @@ This document breaks down the development of the platform operator into small, s
 **Deliverable**: Test adoption scenarios
 
 - [ ] Create E2E test for adoption:
-  - Create resources manually
-  - Create WebService with adoption spec
-  - Verify resources adopted
+  - Create resources manually (Deployment, Service)
+  - Create Transform with adoption spec
+  - Verify resources adopted into ResourceGraph
   - Verify resources managed after adoption
 - [ ] Test adoption failure scenarios
 - [ ] Test mixed adoption (some resources exist, some don't)
@@ -707,53 +813,135 @@ This document breaks down the development of the platform operator into small, s
 
 ---
 
-## Phase 9: Advanced Features - Remote Modules (Week 10-11)
+## Phase 9: Remote CUE Modules (Week 10-11) ⚠️ CRITICAL FOR MVP
 
-**Goal**: Support loading CUE modules from remote sources.
+**Goal**: Support loading CUE platform definitions from remote sources (OCI, Git, ConfigMap).
+
+**Why Critical**: This is what makes the architecture truly decoupled. Without this, platform definitions are hardcoded in the operator.
 
 ### Task 9.1: Implement OCI Module Fetcher
 **Deliverable**: Fetch CUE modules from OCI registries
 
 - [ ] Create `pkg/platformloader/oci.go`:
-  - `FetchOCI(ctx, ref string) ([]byte, string, error)`
+  - `FetchOCI(ctx, ref string, pullSecret *corev1.Secret) ([]byte, string, error)`
   - Use `github.com/google/go-containerregistry` for OCI operations
+  - Support OCI artifact format for CUE modules
   - Verify digest matches reference
   - Return module content and resolved digest
-- [ ] Add authentication support (pull secrets)
+- [ ] Add authentication support (pull secrets from Kubernetes)
 - [ ] Add unit tests with mock registry
+- [ ] Document OCI artifact format for CUE modules
 
 **Acceptance Criteria**:
-- Can fetch from OCI registry
+- Can fetch CUE modules from OCI registry (e.g., ghcr.io, Docker Hub)
 - Digest verification works
-- Authentication supported
+- Authentication via pull secrets supported
 - Unit tests pass
+- OCI artifact format documented
+
+**Example**:
+```yaml
+spec:
+  cueRef:
+    type: oci
+    ref: "ghcr.io/acme/platforms/postgres:v2.1.0"
+    pullSecretRef:
+      name: ghcr-pull-secret
+```
 
 ### Task 9.2: Implement Git Module Fetcher
 **Deliverable**: Fetch CUE modules from Git repositories
 
 - [ ] Create `pkg/platformloader/git.go`:
-  - `FetchGit(ctx, url, ref string) ([]byte, string, error)`
+  - `FetchGit(ctx, url, ref string, authSecret *corev1.Secret) ([]byte, string, error)`
   - Use `github.com/go-git/go-git/v5` for Git operations
+  - Support branch, tag, and commit SHA refs
   - Resolve ref to commit SHA
   - Return module content and commit SHA
-- [ ] Support authentication (SSH keys, tokens)
+- [ ] Support authentication (SSH keys, tokens from Kubernetes secrets)
 - [ ] Add unit tests with mock Git server
+- [ ] Document Git repository structure for CUE modules
 
 **Acceptance Criteria**:
-- Can fetch from Git repository
+- Can fetch from Git repository (GitHub, GitLab, etc.)
 - Ref resolved to commit SHA
-- Authentication supported
+- Authentication via secrets supported
+- Unit tests pass
+- Repository structure documented
+
+**Example**:
+```yaml
+spec:
+  cueRef:
+    type: git
+    ref: "https://github.com/acme/platforms.git?ref=v2.1.0&path=postgres"
+    pullSecretRef:
+      name: git-auth-secret
+```
+
+### Task 9.3: Implement ConfigMap Module Fetcher
+**Deliverable**: Fetch CUE modules from ConfigMaps (for testing/development)
+
+- [ ] Create `pkg/platformloader/configmap.go`:
+  - `FetchConfigMap(ctx, client, namespace, name string) ([]byte, string, error)`
+  - Fetch ConfigMap from Kubernetes
+  - Extract CUE content from data field
+  - Return content and ConfigMap UID as digest
+- [ ] Add unit tests
+- [ ] Document ConfigMap format
+
+**Acceptance Criteria**:
+- Can fetch from ConfigMap
+- Works for testing/development
 - Unit tests pass
 
-### Task 9.3: Implement Module Cache
+**Example**:
+```yaml
+spec:
+  cueRef:
+    type: configmap
+    ref: "my-platform-definition"  # ConfigMap name in same namespace
+```
+
+### Task 9.4: Implement Inline CUE Support
+**Deliverable**: Support inline CUE for simple cases
+
+- [ ] Update Transform controller to handle inline CUE:
+  - `spec.cueRef.type: inline`
+  - `spec.cueRef.ref` contains the CUE code directly
+- [ ] Add validation for inline CUE
+- [ ] Add unit tests
+
+**Acceptance Criteria**:
+- Inline CUE works for simple cases
+- Validation catches syntax errors
+- Unit tests pass
+
+**Example**:
+```yaml
+spec:
+  cueRef:
+    type: inline
+    ref: |
+      #Input: {
+        name: string
+        replicas: int | *1
+      }
+      graph: {
+        nodes: [...]
+      }
+```
+
+### Task 9.5: Implement Module Cache
 **Deliverable**: Persistent cache for remote modules
 
 - [ ] Create `pkg/platformloader/cache.go`:
   - Disk-based cache keyed by digest
   - LRU eviction policy
   - Thread-safe access
-  - Cache size limits
-- [ ] Add cache metrics
+  - Cache size limits (configurable)
+  - TTL for cache entries
+- [ ] Add cache metrics (hits, misses, evictions)
 - [ ] Add unit tests
 
 **Acceptance Criteria**:
@@ -761,18 +949,29 @@ This document breaks down the development of the platform operator into small, s
 - Cache hits avoid network calls
 - LRU eviction works
 - Metrics track cache performance
+- TTL prevents stale modules
 
-### Task 9.4: Integrate Remote Modules into Controller
-**Deliverable**: Controller supports remote platform refs
+### Task 9.6: Integrate Remote Modules into Transform Controller
+**Deliverable**: Transform controller supports all cueRef types
 
-- [ ] Update reconciler to handle remote refs:
-  - Parse `spec.platformRef` (embedded vs OCI vs Git)
-  - Fetch remote modules
+- [ ] Update Transform controller reconciliation:
+  - Parse `spec.cueRef.type` (oci, git, configmap, inline)
+  - Fetch module based on type
   - Cache modules by digest
-  - Update `status.platformRefResolved` with digest
-- [ ] Add timeout for remote fetches
-- [ ] Add retry logic with backoff
-- [ ] Add E2E tests with remote modules
+  - Update `status.resolvedCueRef` with digest and fetchedAt
+- [ ] Add timeout for remote fetches (configurable)
+- [ ] Add retry logic with exponential backoff
+- [ ] Handle fetch failures gracefully (update status, emit events)
+- [ ] Add E2E tests with all cueRef types
+
+**Acceptance Criteria**:
+- All cueRef types work (oci, git, configmap, inline)
+- Modules cached efficiently
+- Timeouts prevent hanging
+- Retries handle transient failures
+- E2E tests pass for all types
+
+**Note**: This task makes the architecture truly decoupled. Platform definitions are now external artifacts!
 
 **Acceptance Criteria**:
 - Remote modules loaded successfully
@@ -782,77 +981,21 @@ This document breaks down the development of the platform operator into small, s
 
 ---
 
-## Phase 10: EKS/ACK Integration (Week 11-12)
-
-**Goal**: Support AWS resources via ACK.
-
-### Task 10.1: Add ACK IAM Role to CUE Module
-**Deliverable**: CUE templates for ACK IAM resources
-
-- [ ] Create `cue/platform/aws/iam.cue`:
-  - Template for ACK IAM Role CR
-  - Template for IAM Policy attachment
-  - IRSA annotation for ServiceAccount
-- [ ] Add dependencies: iamRole → serviceAccount → deployment
-- [ ] Add readiness predicates for ACK conditions
-- [ ] Test CUE evaluation
-
-**Acceptance Criteria**:
-- CUE templates for ACK resources
-- Dependencies defined correctly
-- Readiness predicates for ACK
-
-### Task 10.2: Add Capability Detection
-**Deliverable**: Detect ACK CRDs in cluster
-
-- [ ] Create `pkg/capabilities/detector.go`:
-  - `DetectACK(ctx, client) (bool, error)`
-  - Check for ACK IAM CRDs
-  - Cache detection results
-- [ ] Add to controller startup
-- [ ] Add metrics for capabilities
-
-**Acceptance Criteria**:
-- ACK detection works
-- Results cached
-- Metrics track capabilities
-
-### Task 10.3: Conditional ACK Resource Rendering
-**Deliverable**: Render ACK resources only when available
-
-- [ ] Update CUE module to check capabilities
-- [ ] Conditionally include ACK resources in Graph
-- [ ] Fail with clear error if ACK required but missing
-- [ ] Add unit tests
-
-**Acceptance Criteria**:
-- ACK resources only rendered when available
-- Clear error when ACK missing
-- Tests cover both scenarios
-
-### Task 10.4: E2E Tests with ACK
-**Deliverable**: Test WebService with IRSA
-
-- [ ] Set up kind cluster with ACK controllers (mocked)
-- [ ] Create E2E test:
-  - WebService with IAM requirements
-  - Verify IAM Role CR created
-  - Verify ServiceAccount annotated
-  - Verify Deployment uses ServiceAccount
-- [ ] Test without ACK (should fail gracefully)
-
-**Acceptance Criteria**:
-- E2E test with ACK passes
-- Test without ACK shows clear error
-- All resources created in correct order
-
----
-
-## Phase 11: Production Readiness (Week 12-13)
+## Phase 10: Production Readiness (Week 11-12)
 
 **Goal**: Prepare for production deployment.
 
-### Task 11.1: Add Leader Election
+**Important RBAC Note**:
+The ResourceGraph controller requires broad RBAC permissions because it creates arbitrary Kubernetes resources defined in CUE modules:
+```yaml
+# ResourceGraph controller needs:
+- apiGroups: ["*"]
+  resources: ["*"]
+  verbs: ["create", "update", "patch", "delete", "get", "list", "watch"]
+```
+This is necessary and intentional. The security boundary is the CUE platform definitions and policy validation, not RBAC.
+
+### Task 10.1: Add Leader Election
 **Deliverable**: Support multiple operator replicas
 
 - [ ] Enable leader election in main.go
@@ -866,7 +1009,7 @@ This document breaks down the development of the platform operator into small, s
 - Failover works correctly
 - Metrics track leader status
 
-### Task 11.2: Add Health Checks
+### Task 10.2: Add Health Checks
 **Deliverable**: Liveness and readiness probes
 
 - [ ] Implement `/healthz` endpoint
@@ -882,7 +1025,7 @@ This document breaks down the development of the platform operator into small, s
 - Probes configured in manifest
 - Unhealthy pods restarted
 
-### Task 11.3: Add Resource Limits and Requests
+### Task 10.3: Add Resource Limits and Requests
 **Deliverable**: Proper resource configuration
 
 - [ ] Profile operator resource usage
@@ -896,7 +1039,7 @@ This document breaks down the development of the platform operator into small, s
 - Operator doesn't OOM
 - Resource usage documented
 
-### Task 11.4: Security Hardening
+### Task 10.4: Security Hardening
 **Deliverable**: Secure operator deployment
 
 - [ ] Run as non-root user
@@ -912,7 +1055,7 @@ This document breaks down the development of the platform operator into small, s
 - No high/critical vulnerabilities
 - Security documented
 
-### Task 11.5: Create Helm Chart
+### Task 10.5: Create Helm Chart
 **Deliverable**: Easy installation via Helm
 
 - [ ] Create Helm chart structure
@@ -931,7 +1074,7 @@ This document breaks down the development of the platform operator into small, s
 
 ---
 
-## Phase 12: Documentation and Release (Week 13-14)
+## Phase 11: Documentation and Release (Week 13-14)
 
 **Goal**: Complete documentation and prepare first release.
 
@@ -941,7 +1084,7 @@ This document breaks down the development of the platform operator into small, s
 - [ ] Create `docs/user-guide.md`:
   - Installation instructions
   - WebService API reference
-  - Examples (simple, with policies, with ACK)
+  - Examples (simple, with policies)
   - Troubleshooting guide
 - [ ] Create `docs/platform-engineer-guide.md`:
   - CUE module development
@@ -1011,34 +1154,35 @@ This document breaks down the development of the platform operator into small, s
 
 ## Future Phases (Post v0.1.0)
 
-### Phase 13: Advanced Readiness Predicates
+### Phase 12: Advanced Readiness Predicates
 - Custom readiness webhooks
 - CEL expression support
 - External dependency checks
 - Timeout configuration per predicate
 
-### Phase 14: Rollback and Progressive Delivery
+### Phase 13: Rollback and Progressive Delivery
 - Store previous Graph artifacts
 - `spec.rollbackTo` field
 - Progressive rollout (canary)
 - Automatic rollback on failures
 
-### Phase 15: Multi-Tenancy
+### Phase 14: Multi-Tenancy
 - Namespace scoping
 - Tenant-specific policies
 - RBAC validation
 - Resource quotas
 
-### Phase 16: Enhanced Observability
+### Phase 15: Enhanced Observability
 - OpenTelemetry tracing
 - Backstage plugin
 - Web UI for Graph visualization
 - Cost attribution
 
-### Phase 17: Additional Cloud Providers
+### Phase 16: Additional Cloud Providers
 - GCP integration (Config Connector)
 - Azure integration (ASO)
 - Multi-cloud abstractions
+- ACK integration (AWS) - moved from Phase 10
 
 ---
 
@@ -1057,8 +1201,7 @@ This document breaks down the development of the platform operator into small, s
 - [ ] Comprehensive metrics
 - [ ] Graph artifacts stored
 
-### Phase 10-12 (Production Ready)
-- [ ] ACK integration works
+### Phase 10-11 (Production Ready)
 - [ ] Leader election enabled
 - [ ] Security hardened
 - [ ] Documentation complete
@@ -1087,10 +1230,10 @@ This document breaks down the development of the platform operator into small, s
 - **Weeks 1-2**: Foundation and CRDs
 - **Weeks 3-5**: CUE integration and DAG execution
 - **Weeks 6-8**: Controller and testing
-- **Weeks 9-11**: Advanced features (adoption, remote modules, ACK)
-- **Weeks 12-14**: Production readiness and release
+- **Weeks 9-10**: Advanced features (adoption, remote modules)
+- **Weeks 11-12**: Production readiness and release
 
-**Total**: ~14 weeks to v0.1.0
+**Total**: ~12 weeks to v0.1.0
 
 **Team Size**: 2-3 engineers recommended for this timeline
 

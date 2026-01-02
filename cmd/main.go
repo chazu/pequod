@@ -26,6 +26,7 @@ import (
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -37,6 +38,7 @@ import (
 
 	platformv1alpha1 "github.com/chazu/pequod/api/v1alpha1"
 	"github.com/chazu/pequod/internal/controller"
+	"github.com/chazu/pequod/pkg/platformloader"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -179,10 +181,43 @@ func main() {
 	}
 
 	if err := (&controller.WebServiceReconciler{
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: mgr.GetEventRecorderFor("webservice-controller"),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "WebService")
+		os.Exit(1)
+	}
+	if err := (&controller.ResourceGraphReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "WebService")
+		setupLog.Error(err, "unable to create controller", "controller", "ResourceGraph")
+		os.Exit(1)
+	}
+
+	// Setup Transform controller (generic controller for all transform types)
+	loader := platformloader.NewLoader()
+	renderer := platformloader.NewRenderer(loader)
+
+	// Define the GVKs to watch (for now, just WebService)
+	// In the future, this could be discovered dynamically from platform definitions
+	transformGVKs := []schema.GroupVersionKind{
+		{
+			Group:   "platform.platform.example.com",
+			Version: "v1alpha1",
+			Kind:    "WebService",
+		},
+	}
+
+	if err := (&controller.TransformReconciler{
+		Client:         mgr.GetClient(),
+		Scheme:         mgr.GetScheme(),
+		PlatformLoader: loader,
+		Renderer:       renderer,
+		Recorder:       mgr.GetEventRecorderFor("transform-controller"),
+	}).SetupWithManager(mgr, transformGVKs); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "Transform")
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder

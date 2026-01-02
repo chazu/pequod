@@ -18,4 +18,9 @@ resources:
   kind: WebService
   path: github.com/chazu/pequod/api/v1alpha1
   version: v1alpha1
+- controller: true
+  domain: platform.example.com
+  group: platform
+  kind: ResourceGraph
+  version: v1alpha1
 version: "3"

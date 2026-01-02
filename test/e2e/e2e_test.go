@@ -267,16 +267,197 @@ var _ = Describe("Manager", Ordered, func() {
 		})
 
 		// +kubebuilder:scaffold:e2e-webhooks-checks
+	})
 
-		// TODO: Customize the e2e test suite with scenarios specific to your project.
-		// Consider applying sample/CR(s) and check their status and/or verifying
-		// the reconciliation by using the metrics, i.e.:
-		// metricsOutput, err := getMetricsOutput()
-		// Expect(err).NotTo(HaveOccurred(), "Failed to retrieve logs from curl pod")
-		// Expect(metricsOutput).To(ContainSubstring(
-		//    fmt.Sprintf(`controller_runtime_reconcile_total{controller="%s",result="success"} 1`,
-		//    strings.ToLower(<Kind>),
-		// ))
+	Context("WebService", func() {
+		const testNamespace = "default"
+		const webServiceName = "test-webservice"
+
+		AfterEach(func() {
+			By("cleaning up WebService")
+			cmd := exec.Command("kubectl", "delete", "webservice", webServiceName, "-n", testNamespace, "--ignore-not-found=true")
+			_, _ = utils.Run(cmd)
+
+			By("waiting for resources to be cleaned up")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "deployment", webServiceName, "-n", testNamespace)
+				_, err := utils.Run(cmd)
+				g.Expect(err).To(HaveOccurred(), "Deployment should be deleted")
+			}, 2*time.Minute).Should(Succeed())
+		})
+
+		It("should create and reconcile a WebService", func() {
+			By("creating a WebService resource")
+			webServiceYAML := fmt.Sprintf(`
+apiVersion: platform.pequod.io/v1alpha1
+kind: WebService
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  image: nginx:latest
+  port: 80
+  replicas: 2
+`, webServiceName, testNamespace)
+
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = exec.Command("echo", webServiceYAML).Stdout
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create WebService")
+
+			By("verifying WebService status becomes Ready")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "webservice", webServiceName, "-n", testNamespace,
+					"-o", "jsonpath={.status.conditions[?(@.type=='Ready')].status}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("True"), "WebService should be Ready")
+			}, 3*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("verifying Deployment was created")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "deployment", webServiceName, "-n", testNamespace,
+					"-o", "jsonpath={.spec.replicas}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("2"), "Deployment should have 2 replicas")
+			}, 2*time.Minute).Should(Succeed())
+
+			By("verifying Service was created")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "service", webServiceName, "-n", testNamespace,
+					"-o", "jsonpath={.spec.ports[0].port}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("80"), "Service should expose port 80")
+			}, 2*time.Minute).Should(Succeed())
+
+			By("verifying Deployment becomes available")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "deployment", webServiceName, "-n", testNamespace,
+					"-o", "jsonpath={.status.availableReplicas}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("2"), "Deployment should have 2 available replicas")
+			}, 3*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("verifying reconciliation metrics")
+			metricsOutput, err := getMetricsOutput()
+			Expect(err).NotTo(HaveOccurred(), "Failed to retrieve metrics")
+			Expect(metricsOutput).To(ContainSubstring("controller_runtime_reconcile_total"),
+				"Metrics should include reconciliation counter")
+		})
+
+		It("should update WebService when spec changes", func() {
+			By("creating initial WebService")
+			webServiceYAML := fmt.Sprintf(`
+apiVersion: platform.pequod.io/v1alpha1
+kind: WebService
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  image: nginx:latest
+  port: 80
+  replicas: 1
+`, webServiceName, testNamespace)
+
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = exec.Command("echo", webServiceYAML).Stdout
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for initial reconciliation")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "webservice", webServiceName, "-n", testNamespace,
+					"-o", "jsonpath={.status.conditions[?(@.type=='Ready')].status}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("True"))
+			}, 3*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("updating WebService replicas")
+			updatedYAML := fmt.Sprintf(`
+apiVersion: platform.pequod.io/v1alpha1
+kind: WebService
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  image: nginx:latest
+  port: 80
+  replicas: 3
+`, webServiceName, testNamespace)
+
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = exec.Command("echo", updatedYAML).Stdout
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying Deployment was updated")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "deployment", webServiceName, "-n", testNamespace,
+					"-o", "jsonpath={.spec.replicas}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("3"), "Deployment should have 3 replicas")
+			}, 2*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("verifying all replicas become available")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "deployment", webServiceName, "-n", testNamespace,
+					"-o", "jsonpath={.status.availableReplicas}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("3"))
+			}, 3*time.Minute, 5*time.Second).Should(Succeed())
+		})
+
+		It("should handle WebService deletion", func() {
+			By("creating a WebService")
+			webServiceYAML := fmt.Sprintf(`
+apiVersion: platform.pequod.io/v1alpha1
+kind: WebService
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  image: nginx:latest
+  port: 80
+  replicas: 1
+`, webServiceName, testNamespace)
+
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = exec.Command("echo", webServiceYAML).Stdout
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for resources to be created")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "deployment", webServiceName, "-n", testNamespace)
+				_, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+			}, 2*time.Minute).Should(Succeed())
+
+			By("deleting the WebService")
+			cmd = exec.Command("kubectl", "delete", "webservice", webServiceName, "-n", testNamespace)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying Deployment is deleted")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "deployment", webServiceName, "-n", testNamespace)
+				_, err := utils.Run(cmd)
+				g.Expect(err).To(HaveOccurred(), "Deployment should be deleted")
+			}, 2*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("verifying Service is deleted")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "service", webServiceName, "-n", testNamespace)
+				_, err := utils.Run(cmd)
+				g.Expect(err).To(HaveOccurred(), "Service should be deleted")
+			}, 2*time.Minute, 5*time.Second).Should(Succeed())
+		})
 	})
 })
 

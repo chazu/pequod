@@ -73,6 +73,42 @@ This document provides detailed information about the key libraries used in Pequ
 - **Usage in Pequod**: Consider if `dominikbraun/graph` has performance issues
 - **When to Use**: High-frequency DAG operations, large graphs (100+ nodes)
 
+## Concurrency Libraries
+
+### sourcegraph/conc
+- **Package**: `github.com/sourcegraph/conc`
+- **GitHub**: https://github.com/sourcegraph/conc
+- **Purpose**: Better structured concurrency for Go
+- **Key Features**:
+  - Worker pools with bounded concurrency (`pool.Pool`)
+  - Automatic panic recovery and propagation
+  - Error aggregation for concurrent tasks (`pool.ErrorPool`)
+  - Result collection from parallel tasks (`pool.ResultPool`)
+  - Prevents goroutine leaks with scoped concurrency
+  - Cleaner API than manual sync.WaitGroup + channels
+- **Usage in Pequod**:
+  - DAG executor worker pool for parallel node application
+  - Bounded concurrency (configurable max goroutines)
+  - Panic-safe goroutine execution in long-running operator
+  - Error collection from parallel apply operations
+- **Example**:
+  ```go
+  p := pool.New().WithMaxGoroutines(10).WithErrors()
+  for _, node := range nodes {
+      node := node
+      p.Go(func() error {
+          return applyNode(ctx, node)
+      })
+  }
+  if err := p.Wait(); err != nil {
+      // Handle aggregated errors
+  }
+  ```
+- **Why Not Standard Library**:
+  - Manual worker pools require significant boilerplate
+  - Easy to leak goroutines or mishandle panics
+  - `conc` provides safety guarantees critical for operators
+
 ## CUE Integration
 
 ### cuelang.org/go/cue
