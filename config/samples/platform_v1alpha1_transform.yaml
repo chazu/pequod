@@ -1,0 +1,19 @@
+# Example Transform for a WebService platform
+# This demonstrates how to use the Transform CRD to deploy a web service
+apiVersion: platform.platform.example.com/v1alpha1
+kind: Transform
+metadata:
+  name: my-webservice
+  namespace: default
+spec:
+  # Reference to the CUE platform module
+  # Currently only "embedded" type is supported
+  cueRef:
+    type: embedded
+    ref: webservice
+  # Input data for the platform module
+  # This gets validated against the CUE schema
+  input:
+    image: nginx:latest
+    port: 80
+    replicas: 2

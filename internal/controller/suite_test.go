@@ -25,7 +25,6 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -88,7 +87,7 @@ var _ = BeforeSuite(func() {
 	Expect(err).NotTo(HaveOccurred())
 	Expect(k8sClient).NotTo(BeNil())
 
-	// Start the manager with the WebServiceReconciler
+	// Start the manager with controllers
 	By("setting up the manager")
 	k8sManager, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme: scheme.Scheme,
@@ -98,15 +97,7 @@ var _ = BeforeSuite(func() {
 	})
 	Expect(err).ToNot(HaveOccurred())
 
-	// WebService controller is deprecated - using Transform controller instead
-	// Uncomment to test old WebService controller
-	// err = (&WebServiceReconciler{
-	// 	Client:   k8sManager.GetClient(),
-	// 	Scheme:   k8sManager.GetScheme(),
-	// 	Recorder: k8sManager.GetEventRecorderFor("webservice-controller"),
-	// }).SetupWithManager(k8sManager)
-	// Expect(err).ToNot(HaveOccurred())
-
+	// Setup ResourceGraph controller (executes rendered graphs)
 	err = (&ResourceGraphReconciler{
 		Client: k8sManager.GetClient(),
 		Scheme: k8sManager.GetScheme(),
@@ -116,13 +107,6 @@ var _ = BeforeSuite(func() {
 	// Setup Transform controller
 	loader := platformloader.NewLoader()
 	renderer := platformloader.NewRenderer(loader)
-	transformGVKs := []schema.GroupVersionKind{
-		{
-			Group:   "platform.platform.example.com",
-			Version: "v1alpha1",
-			Kind:    "WebService",
-		},
-	}
 
 	err = (&TransformReconciler{
 		Client:         k8sManager.GetClient(),
@@ -130,7 +114,7 @@ var _ = BeforeSuite(func() {
 		PlatformLoader: loader,
 		Renderer:       renderer,
 		Recorder:       k8sManager.GetEventRecorderFor("transform-controller"),
-	}).SetupWithManager(k8sManager, transformGVKs)
+	}).SetupWithManager(k8sManager)
 	Expect(err).ToNot(HaveOccurred())
 
 	go func() {

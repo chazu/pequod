@@ -2,9 +2,11 @@ package platformloader
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 func TestNewRenderer(t *testing.T) {
@@ -20,14 +22,23 @@ func TestNewRenderer(t *testing.T) {
 	}
 }
 
-func TestRender(t *testing.T) {
+func TestRenderTransform(t *testing.T) {
 	loader := NewLoader()
 	renderer := NewRenderer(loader)
 	ctx := context.Background()
 
-	// Test basic rendering
-	replicas := int32(3)
-	g, err := renderer.Render(ctx, "test-app", "default", "nginx:latest", 8080, &replicas, "embedded")
+	// Build input as raw JSON (matching Transform input format)
+	input := map[string]interface{}{
+		"image":    "nginx:latest",
+		"port":     8080,
+		"replicas": 3,
+	}
+	inputJSON, err := json.Marshal(input)
+	if err != nil {
+		t.Fatalf("failed to marshal input: %v", err)
+	}
+
+	g, err := renderer.RenderTransform(ctx, "test-app", "default", runtime.RawExtension{Raw: inputJSON}, "webservice")
 	if err != nil {
 		t.Fatalf("failed to render: %v", err)
 	}
@@ -45,8 +56,8 @@ func TestRender(t *testing.T) {
 		t.Errorf("expected metadata.version 'v1alpha1', got '%s'", g.Metadata.Version)
 	}
 
-	if g.Metadata.PlatformRef != "embedded" {
-		t.Errorf("expected metadata.platformRef 'embedded', got '%s'", g.Metadata.PlatformRef)
+	if g.Metadata.PlatformRef != "webservice" {
+		t.Errorf("expected metadata.platformRef 'webservice', got '%s'", g.Metadata.PlatformRef)
 	}
 
 	// Verify nodes
@@ -109,13 +120,22 @@ func TestRender(t *testing.T) {
 	}
 }
 
-func TestRenderWithDefaultReplicas(t *testing.T) {
+func TestRenderTransformWithDefaultReplicas(t *testing.T) {
 	loader := NewLoader()
 	renderer := NewRenderer(loader)
 	ctx := context.Background()
 
-	// Test rendering without replicas (should default to 1)
-	g, err := renderer.Render(ctx, "test-app", "default", "nginx:latest", 8080, nil, "embedded")
+	// Build input without replicas (should default to 1)
+	input := map[string]interface{}{
+		"image": "nginx:latest",
+		"port":  8080,
+	}
+	inputJSON, err := json.Marshal(input)
+	if err != nil {
+		t.Fatalf("failed to marshal input: %v", err)
+	}
+
+	g, err := renderer.RenderTransform(ctx, "test-app", "default", runtime.RawExtension{Raw: inputJSON}, "webservice")
 	if err != nil {
 		t.Fatalf("failed to render: %v", err)
 	}
@@ -138,9 +158,9 @@ func TestRenderWithDefaultReplicas(t *testing.T) {
 	}
 }
 
-func TestRenderWithEnvFrom(t *testing.T) {
+func TestRenderTransformWithEnvFrom(t *testing.T) {
 	// For now, skip this test - we'll implement envFrom support in the renderer later
-	// The CUE template is ready, but we need to update the Renderer.Render method
+	// The CUE template is ready, but we need to update the input format
 	// to accept and pass envFrom to the CUE template
 	t.Skip("EnvFrom support in renderer not yet implemented - CUE template is ready")
 }

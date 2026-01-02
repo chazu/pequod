@@ -1,12 +1,15 @@
 package platformloader
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 
 	"cuelang.org/go/cue"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 
 	"github.com/chazu/pequod/pkg/graph"
 )
@@ -23,30 +26,51 @@ func NewRenderer(loader *Loader) *Renderer {
 	}
 }
 
-// Render converts a WebService spec to a Graph artifact using CUE evaluation
-func (r *Renderer) Render(ctx context.Context, name, namespace, image string, port int32, replicas *int32, platformRef string) (*graph.Graph, error) {
-	// Load the CUE module
+// RenderTransform renders a Transform's input through a CUE platform module
+// This is the generic rendering method that works with any platform type.
+// The input is expected to contain the platform-specific "spec" fields.
+// Metadata (name, namespace) is provided separately and injected into the CUE input.
+func (r *Renderer) RenderTransform(ctx context.Context, name, namespace string, rawInput runtime.RawExtension, platformRef string) (*graph.Graph, error) {
+	// Load the CUE module based on platformRef
+	// For now, we only support embedded modules
 	cueValue, err := r.loader.LoadEmbedded(platformRef)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load CUE module: %w", err)
 	}
 
-	// Build the input structure
+	// Parse the raw input using json.Decoder with UseNumber() to preserve integer types
+	// Standard json.Unmarshal converts all numbers to float64, which causes CUE type errors
+	var specInput map[string]interface{}
+	if len(rawInput.Raw) > 0 {
+		decoder := json.NewDecoder(bytes.NewReader(rawInput.Raw))
+		decoder.UseNumber()
+		if err := decoder.Decode(&specInput); err != nil {
+			return nil, fmt.Errorf("failed to parse input: %w", err)
+		}
+		// Convert json.Number to native types for CUE compatibility
+		specInput = convertJSONNumbers(specInput).(map[string]interface{})
+	} else {
+		specInput = make(map[string]interface{})
+	}
+
+	// Inject platformRef into spec for CUE template to use
+	specInput["platformRef"] = platformRef
+
+	// Build the CUE input structure
+	// CUE expects: { metadata: { name, namespace }, spec: { ...platform-specific... } }
 	input := map[string]interface{}{
 		"metadata": map[string]interface{}{
 			"name":      name,
 			"namespace": namespace,
 		},
-		"spec": map[string]interface{}{
-			"image": image,
-			"port":  port,
-		},
+		"spec": specInput,
 	}
 
-	if replicas != nil {
-		input["spec"].(map[string]interface{})["replicas"] = *replicas
-	}
+	return r.renderWithInput(cueValue, input)
+}
 
+// renderWithInput is the internal rendering method that takes a loaded CUE value and input
+func (r *Renderer) renderWithInput(cueValue cue.Value, input map[string]interface{}) (*graph.Graph, error) {
 	// Fill the #Render template with our input
 	renderDef := cueValue.LookupPath(cue.ParsePath("#Render"))
 	if !renderDef.Exists() {
@@ -118,6 +142,37 @@ func (r *Renderer) cueValueToGraph(v cue.Value) (*graph.Graph, error) {
 		Nodes:      nodes,
 		Violations: temp.Violations,
 	}, nil
+}
+
+// convertJSONNumbers recursively converts json.Number values to native Go types
+// This preserves integer types when possible, which is required for CUE type checking
+func convertJSONNumbers(v interface{}) interface{} {
+	switch val := v.(type) {
+	case json.Number:
+		// Try to parse as int first
+		if i, err := strconv.ParseInt(string(val), 10, 64); err == nil {
+			return i
+		}
+		// Fall back to float
+		if f, err := strconv.ParseFloat(string(val), 64); err == nil {
+			return f
+		}
+		return val
+	case map[string]interface{}:
+		result := make(map[string]interface{}, len(val))
+		for k, v := range val {
+			result[k] = convertJSONNumbers(v)
+		}
+		return result
+	case []interface{}:
+		result := make([]interface{}, len(val))
+		for i, v := range val {
+			result[i] = convertJSONNumbers(v)
+		}
+		return result
+	default:
+		return v
+	}
 }
 
 // parseNode converts a JSON node to a graph.Node

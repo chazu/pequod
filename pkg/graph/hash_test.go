@@ -128,6 +128,71 @@ func TestHasChanged(t *testing.T) {
 	}
 }
 
+// ============================================================================
+// Benchmarks
+// ============================================================================
+
+func createBenchmarkGraph(numNodes int) *Graph {
+	nodes := make([]Node, numNodes)
+	for i := 0; i < numNodes; i++ {
+		nodes[i] = Node{
+			ID: string(rune('a'+i%26)) + string(rune('0'+i/26)),
+			Object: unstructured.Unstructured{
+				Object: map[string]interface{}{
+					"apiVersion": "v1",
+					"kind":       "ConfigMap",
+					"metadata": map[string]interface{}{
+						"name":      "configmap-" + string(rune('0'+i)),
+						"namespace": "default",
+					},
+					"data": map[string]interface{}{
+						"key1": "value1",
+						"key2": "value2",
+						"key3": "value3",
+					},
+				},
+			},
+		}
+	}
+	return &Graph{
+		Metadata: GraphMetadata{Name: "benchmark", Version: "v1"},
+		Nodes:    nodes,
+	}
+}
+
+func BenchmarkComputeHash_10Nodes(b *testing.B) {
+	g := createBenchmarkGraph(10)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = g.ComputeHash()
+	}
+}
+
+func BenchmarkComputeHash_50Nodes(b *testing.B) {
+	g := createBenchmarkGraph(50)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = g.ComputeHash()
+	}
+}
+
+func BenchmarkComputeHash_100Nodes(b *testing.B) {
+	g := createBenchmarkGraph(100)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = g.ComputeHash()
+	}
+}
+
+func BenchmarkHasChanged(b *testing.B) {
+	g := createBenchmarkGraph(50)
+	previousHash := g.ComputeHash()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = g.HasChanged(previousHash)
+	}
+}
+
 func TestHashIgnoresMetadata(t *testing.T) {
 	g1 := &Graph{
 		Metadata: GraphMetadata{

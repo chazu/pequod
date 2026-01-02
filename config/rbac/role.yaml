@@ -22,7 +22,7 @@ rules:
   - platform.platform.example.com
   resources:
   - resourcegraphs
-  - webservices
+  - transforms
   verbs:
   - create
   - delete
@@ -35,14 +35,14 @@ rules:
   - platform.platform.example.com
   resources:
   - resourcegraphs/finalizers
-  - webservices/finalizers
+  - transforms/finalizers
   verbs:
   - update
 - apiGroups:
   - platform.platform.example.com
   resources:
   - resourcegraphs/status
-  - webservices/status
+  - transforms/status
   verbs:
   - get
   - patch

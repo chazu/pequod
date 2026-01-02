@@ -29,65 +29,76 @@ func TestValidateInput(t *testing.T) {
 
 	tests := []struct {
 		name      string
-		image     string
-		port      int32
-		replicas  *int32
+		input     map[string]interface{}
 		wantError bool
 		wantWarn  bool
 	}{
 		{
-			name:      "valid input",
-			image:     "nginx:latest",
-			port:      8080,
-			replicas:  int32Ptr(3),
+			name: "valid input",
+			input: map[string]interface{}{
+				"image":    "nginx:latest",
+				"port":     8080,
+				"replicas": 3,
+			},
 			wantError: false,
 			wantWarn:  false,
 		},
 		{
-			name:      "empty image",
-			image:     "",
-			port:      8080,
-			replicas:  int32Ptr(3),
+			name: "empty image",
+			input: map[string]interface{}{
+				"image":    "",
+				"port":     8080,
+				"replicas": 3,
+			},
 			wantError: true,
 			wantWarn:  false,
 		},
 		{
-			name:      "invalid port - too low",
-			image:     "nginx:latest",
-			port:      0,
-			replicas:  int32Ptr(3),
+			name: "invalid port - too low",
+			input: map[string]interface{}{
+				"image":    "nginx:latest",
+				"port":     0,
+				"replicas": 3,
+			},
 			wantError: true,
 			wantWarn:  false,
 		},
 		{
-			name:      "invalid port - too high",
-			image:     "nginx:latest",
-			port:      70000,
-			replicas:  int32Ptr(3),
+			name: "invalid port - too high",
+			input: map[string]interface{}{
+				"image":    "nginx:latest",
+				"port":     70000,
+				"replicas": 3,
+			},
 			wantError: true,
 			wantWarn:  false,
 		},
 		{
-			name:      "negative replicas",
-			image:     "nginx:latest",
-			port:      8080,
-			replicas:  int32Ptr(-1),
+			name: "negative replicas",
+			input: map[string]interface{}{
+				"image":    "nginx:latest",
+				"port":     8080,
+				"replicas": -1,
+			},
 			wantError: true,
 			wantWarn:  false,
 		},
 		{
-			name:      "high replicas warning",
-			image:     "nginx:latest",
-			port:      8080,
-			replicas:  int32Ptr(15),
+			name: "high replicas warning",
+			input: map[string]interface{}{
+				"image":    "nginx:latest",
+				"port":     8080,
+				"replicas": 15,
+			},
 			wantError: false,
 			wantWarn:  true,
 		},
 		{
-			name:      "nil replicas",
-			image:     "nginx:latest",
-			port:      8080,
-			replicas:  nil,
+			name: "nil replicas",
+			input: map[string]interface{}{
+				"image": "nginx:latest",
+				"port":  8080,
+			},
 			wantError: false,
 			wantWarn:  false,
 		},
@@ -95,7 +106,7 @@ func TestValidateInput(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			violations, err := validator.ValidateInput(ctx, "test", "default", tt.image, tt.port, tt.replicas)
+			violations, err := validator.ValidateInput(ctx, tt.input)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -186,8 +197,4 @@ func TestValidateOutput(t *testing.T) {
 			t.Errorf("unexpected error violation: %+v", v)
 		}
 	}
-}
-
-func int32Ptr(i int32) *int32 {
-	return &i
 }

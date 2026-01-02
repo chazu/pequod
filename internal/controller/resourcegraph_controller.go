@@ -21,10 +21,14 @@ import (
 	"fmt"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -38,6 +42,16 @@ import (
 
 const (
 	resourceGraphFinalizer = "platform.pequod.io/resourcegraph-finalizer"
+
+	// Phase constants for ResourceGraph status
+	PhasePending   = "Pending"
+	PhaseExecuting = "Executing"
+	PhaseCompleted = "Completed"
+	PhaseFailed    = "Failed"
+
+	// Condition type constants
+	ConditionTypeReady  = "Ready"
+	ConditionTypeFailed = "Failed"
 )
 
 // ResourceGraphReconciler reconciles a ResourceGraph object
@@ -47,11 +61,20 @@ type ResourceGraphReconciler struct {
 	Applier  *apply.Applier
 	Checker  *readiness.Checker
 	Executor *graph.Executor
+	Recorder record.EventRecorder
+
+	// RequeueInterval is the interval to requeue when waiting for readiness
+	// Default: 5 seconds
+	RequeueInterval time.Duration
 }
+
+// DefaultRequeueInterval is the default interval for requeuing
+const DefaultRequeueInterval = 5 * time.Second
 
 // +kubebuilder:rbac:groups=platform.platform.example.com,resources=resourcegraphs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=platform.platform.example.com,resources=resourcegraphs/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=platform.platform.example.com,resources=resourcegraphs/finalizers,verbs=update
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups="",resources=*,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps,resources=*,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=batch,resources=*,verbs=get;list;watch;create;update;patch;delete
@@ -88,9 +111,18 @@ func (r *ResourceGraphReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	// Check if already completed
-	if rg.Status.Phase == "Completed" || rg.Status.Phase == "Failed" {
-		logger.Info("ResourceGraph already in terminal state", "phase", rg.Status.Phase)
-		return ctrl.Result{}, nil
+	if rg.Status.Phase == PhaseCompleted || rg.Status.Phase == PhaseFailed {
+		// Allow re-execution if the spec has changed (generation mismatch)
+		if rg.Status.ObservedGeneration == rg.Generation {
+			logger.Info("ResourceGraph already in terminal state", "phase", rg.Status.Phase)
+			return ctrl.Result{}, nil
+		}
+		// Spec changed since last execution - allow re-execution
+		logger.Info("ResourceGraph spec changed, allowing re-execution",
+			"phase", rg.Status.Phase,
+			"observedGeneration", rg.Status.ObservedGeneration,
+			"currentGeneration", rg.Generation)
+		r.recordEvent(rg, "Normal", "ReExecuting", "Spec changed, re-executing graph")
 	}
 
 	// Execute the graph
@@ -105,12 +137,16 @@ func (r *ResourceGraphReconciler) executeGraph(ctx context.Context, rg *platform
 	internalGraph, err := r.convertToInternalGraph(rg)
 	if err != nil {
 		logger.Error(err, "Failed to convert ResourceGraph to internal Graph")
+		r.recordEvent(rg, "Warning", "ConversionFailed", fmt.Sprintf("Failed to convert graph: %v", err))
 		return r.updateStatusFailed(ctx, rg, fmt.Sprintf("Failed to convert graph: %v", err))
 	}
 
-	// Validate the graph
+	// Validate the graph before DAG building for better error reporting.
+	// Note: BuildDAG also validates, but we do it here to provide user-friendly
+	// events and status updates before attempting DAG construction.
 	if err := internalGraph.Validate(); err != nil {
 		logger.Error(err, "Graph validation failed")
+		r.recordEvent(rg, "Warning", "ValidationFailed", fmt.Sprintf("Graph validation failed: %v", err))
 		return r.updateStatusFailed(ctx, rg, fmt.Sprintf("Graph validation failed: %v", err))
 	}
 
@@ -118,25 +154,41 @@ func (r *ResourceGraphReconciler) executeGraph(ctx context.Context, rg *platform
 	dag, err := graph.BuildDAG(internalGraph)
 	if err != nil {
 		logger.Error(err, "Failed to build DAG")
+		r.recordEvent(rg, "Warning", "DAGBuildFailed", fmt.Sprintf("Failed to build DAG: %v", err))
 		return r.updateStatusFailed(ctx, rg, fmt.Sprintf("Failed to build DAG: %v", err))
 	}
 
 	// Update status to Executing
 	if err := r.updateStatusExecuting(ctx, rg); err != nil {
 		logger.Error(err, "Failed to update status to Executing")
-		return ctrl.Result{}, err
+		// Requeue to retry status update
+		return ctrl.Result{Requeue: true}, err
 	}
+
+	// Record execution start event
+	r.recordEvent(rg, "Normal", "ExecutionStarted", fmt.Sprintf("Starting execution of %d nodes", len(internalGraph.Nodes)))
 
 	// Execute the DAG
 	logger.Info("Executing DAG", "nodeCount", len(internalGraph.Nodes))
 	executionState, err := r.Executor.Execute(ctx, dag)
 	if err != nil {
 		logger.Error(err, "DAG execution failed")
+		r.recordEvent(rg, "Warning", "ExecutionFailed", fmt.Sprintf("DAG execution failed: %v", err))
 		return r.updateStatusFromExecution(ctx, rg, executionState, false)
 	}
 
+	// Record success event
+	r.recordEvent(rg, "Normal", "ExecutionCompleted", fmt.Sprintf("Successfully applied %d resources", len(internalGraph.Nodes)))
+
 	// Update status from execution state
 	return r.updateStatusFromExecution(ctx, rg, executionState, true)
+}
+
+// recordEvent records an event if the recorder is available
+func (r *ResourceGraphReconciler) recordEvent(rg *platformv1alpha1.ResourceGraph, eventType, reason, message string) {
+	if r.Recorder != nil {
+		r.Recorder.Event(rg, eventType, reason, message)
+	}
 }
 
 // handleDeletion handles ResourceGraph deletion
@@ -171,23 +223,63 @@ func (r *ResourceGraphReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.Executor == nil {
 		r.Executor = graph.NewExecutor(r.Applier, r.Checker, r.Client, graph.DefaultExecutorConfig())
 	}
+	if r.Recorder == nil {
+		r.Recorder = mgr.GetEventRecorderFor("resourcegraph-controller")
+	}
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&platformv1alpha1.ResourceGraph{}).
+		// Watch common resource types that ResourceGraph may create
+		// Changes to these resources will trigger reconciliation of the owning ResourceGraph
+		Owns(&appsv1.Deployment{}).
+		Owns(&appsv1.StatefulSet{}).
+		Owns(&appsv1.DaemonSet{}).
+		Owns(&corev1.Service{}).
+		Owns(&corev1.ConfigMap{}).
+		Owns(&corev1.Secret{}).
+		Owns(&corev1.ServiceAccount{}).
+		Owns(&batchv1.Job{}).
+		Owns(&batchv1.CronJob{}).
 		Named("resourcegraph").
 		Complete(r)
 }
 
-
 // convertToInternalGraph converts a ResourceGraph CR to the internal Graph type
 func (r *ResourceGraphReconciler) convertToInternalGraph(rg *platformv1alpha1.ResourceGraph) (*graph.Graph, error) {
 	nodes := make([]graph.Node, 0, len(rg.Spec.Nodes))
+
+	// Create owner reference for applied resources
+	// Resources will be owned by the ResourceGraph for proper cleanup
+	ownerRef := metav1.OwnerReference{
+		APIVersion:         rg.APIVersion,
+		Kind:               rg.Kind,
+		Name:               rg.Name,
+		UID:                rg.UID,
+		Controller:         ptr(true),
+		BlockOwnerDeletion: ptr(true),
+	}
 
 	for _, rgNode := range rg.Spec.Nodes {
 		// Decode RawExtension to Unstructured
 		unstructuredObj := &unstructured.Unstructured{}
 		if err := unstructuredObj.UnmarshalJSON(rgNode.Object.Raw); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal node %s object: %w", rgNode.ID, err)
+		}
+
+		// Inject owner reference into the object
+		// This ensures resources are cleaned up when ResourceGraph is deleted
+		existingRefs := unstructuredObj.GetOwnerReferences()
+		// Check if owner reference already exists to avoid duplicates
+		hasOwnerRef := false
+		for _, ref := range existingRefs {
+			if ref.UID == rg.UID {
+				hasOwnerRef = true
+				break
+			}
+		}
+		if !hasOwnerRef {
+			existingRefs = append(existingRefs, ownerRef)
+			unstructuredObj.SetOwnerReferences(existingRefs)
 		}
 
 		// Convert ApplyPolicy
@@ -245,7 +337,7 @@ func (r *ResourceGraphReconciler) convertToInternalGraph(rg *platformv1alpha1.Re
 // updateStatusExecuting updates the ResourceGraph status to Executing
 func (r *ResourceGraphReconciler) updateStatusExecuting(ctx context.Context, rg *platformv1alpha1.ResourceGraph) error {
 	now := metav1.Now()
-	rg.Status.Phase = "Executing"
+	rg.Status.Phase = PhaseExecuting
 	rg.Status.StartedAt = &now
 	rg.Status.ObservedGeneration = rg.Generation
 
@@ -256,7 +348,7 @@ func (r *ResourceGraphReconciler) updateStatusExecuting(ctx context.Context, rg 
 	for _, node := range rg.Spec.Nodes {
 		if _, exists := rg.Status.NodeStates[node.ID]; !exists {
 			rg.Status.NodeStates[node.ID] = platformv1alpha1.NodeExecutionState{
-				Phase:              "Pending",
+				Phase:              PhasePending,
 				LastTransitionTime: &now,
 			}
 		}
@@ -268,14 +360,14 @@ func (r *ResourceGraphReconciler) updateStatusExecuting(ctx context.Context, rg 
 // updateStatusFailed updates the ResourceGraph status to Failed
 func (r *ResourceGraphReconciler) updateStatusFailed(ctx context.Context, rg *platformv1alpha1.ResourceGraph, message string) (ctrl.Result, error) {
 	now := metav1.Now()
-	rg.Status.Phase = "Failed"
+	rg.Status.Phase = PhaseFailed
 	rg.Status.CompletedAt = &now
 	rg.Status.ObservedGeneration = rg.Generation
 
 	// Add condition
 	rg.Status.Conditions = []metav1.Condition{
 		{
-			Type:               "Failed",
+			Type:               ConditionTypeFailed,
 			Status:             metav1.ConditionTrue,
 			LastTransitionTime: now,
 			Reason:             "ExecutionFailed",
@@ -284,7 +376,8 @@ func (r *ResourceGraphReconciler) updateStatusFailed(ctx context.Context, rg *pl
 	}
 
 	if err := r.Status().Update(ctx, rg); err != nil {
-		return ctrl.Result{}, err
+		// Requeue to retry status update
+		return ctrl.Result{Requeue: true}, err
 	}
 
 	return ctrl.Result{}, nil
@@ -330,11 +423,11 @@ func (r *ResourceGraphReconciler) updateStatusFromExecution(ctx context.Context,
 
 	// Update overall phase
 	if success && state.IsComplete() {
-		rg.Status.Phase = "Completed"
+		rg.Status.Phase = PhaseCompleted
 		rg.Status.CompletedAt = &now
 		rg.Status.Conditions = []metav1.Condition{
 			{
-				Type:               "Ready",
+				Type:               ConditionTypeReady,
 				Status:             metav1.ConditionTrue,
 				LastTransitionTime: now,
 				Reason:             "ExecutionCompleted",
@@ -342,11 +435,11 @@ func (r *ResourceGraphReconciler) updateStatusFromExecution(ctx context.Context,
 			},
 		}
 	} else {
-		rg.Status.Phase = "Failed"
+		rg.Status.Phase = PhaseFailed
 		rg.Status.CompletedAt = &now
 		rg.Status.Conditions = []metav1.Condition{
 			{
-				Type:               "Failed",
+				Type:               ConditionTypeFailed,
 				Status:             metav1.ConditionTrue,
 				LastTransitionTime: now,
 				Reason:             "ExecutionFailed",
@@ -358,14 +451,27 @@ func (r *ResourceGraphReconciler) updateStatusFromExecution(ctx context.Context,
 	rg.Status.ObservedGeneration = rg.Generation
 
 	if err := r.Status().Update(ctx, rg); err != nil {
-		return ctrl.Result{}, err
+		// Requeue to retry status update
+		return ctrl.Result{Requeue: true}, err
 	}
 
 	// Requeue if not complete to check readiness
 	if !state.IsComplete() {
-		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		return ctrl.Result{RequeueAfter: r.getRequeueInterval()}, nil
 	}
 
 	return ctrl.Result{}, nil
 }
 
+// getRequeueInterval returns the configured requeue interval or the default
+func (r *ResourceGraphReconciler) getRequeueInterval() time.Duration {
+	if r.RequeueInterval > 0 {
+		return r.RequeueInterval
+	}
+	return DefaultRequeueInterval
+}
+
+// ptr returns a pointer to the given value
+func ptr[T any](v T) *T {
+	return &v
+}

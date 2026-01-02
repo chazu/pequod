@@ -49,8 +49,15 @@ package webservice
 	// Output graph
 	output: #Graph & {
 		metadata: {
-			name:        "\(input.metadata.name)-graph"
-			platformRef: input.spec.platformRef | *"embedded"
+			name: "\(input.metadata.name)-graph"
+			// Use input platformRef if provided, otherwise default to "embedded"
+			// Note: Use if/else pattern to avoid CUE disjunction default behavior
+			if input.spec.platformRef != _|_ {
+				platformRef: input.spec.platformRef
+			}
+			if input.spec.platformRef == _|_ {
+				platformRef: "embedded"
+			}
 		}
 
 		nodes: [

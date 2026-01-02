@@ -21,51 +21,73 @@ func NewPolicyValidator(loader *Loader) *PolicyValidator {
 	}
 }
 
-// ValidateInput validates a WebService spec against input policies
-func (pv *PolicyValidator) ValidateInput(ctx context.Context, name, namespace, image string, port int32, replicas *int32) ([]graph.Violation, error) {
+// ValidateInput validates platform input against input policies
+// The input map should contain the spec fields for the platform type being validated.
+// For webservice: image (string), port (int), replicas (int)
+func (pv *PolicyValidator) ValidateInput(ctx context.Context, input map[string]interface{}) ([]graph.Violation, error) {
 	// For now, we'll implement basic validation in Go
 	// In the future, this could use CUE policy evaluation
 	var violations []graph.Violation
 
-	// Validate image is not empty
-	if image == "" {
-		violations = append(violations, graph.Violation{
-			Path:     "spec.image",
-			Message:  "image is required",
-			Severity: "Error",
-		})
+	// Validate image is not empty (common to webservice)
+	if image, ok := input["image"].(string); ok {
+		if image == "" {
+			violations = append(violations, graph.Violation{
+				Path:     "spec.image",
+				Message:  "image is required",
+				Severity: "Error",
+			})
+		}
 	}
 
-	// Validate port range
-	if port < 1 || port > 65535 {
-		violations = append(violations, graph.Violation{
-			Path:     "spec.port",
-			Message:  fmt.Sprintf("port must be between 1 and 65535, got %d", port),
-			Severity: "Error",
-		})
+	// Validate port range if present
+	if port, ok := getInt(input["port"]); ok {
+		if port < 1 || port > 65535 {
+			violations = append(violations, graph.Violation{
+				Path:     "spec.port",
+				Message:  fmt.Sprintf("port must be between 1 and 65535, got %d", port),
+				Severity: "Error",
+			})
+		}
 	}
 
 	// Validate replicas if specified
-	if replicas != nil {
-		if *replicas < 0 {
+	if replicas, ok := getInt(input["replicas"]); ok {
+		if replicas < 0 {
 			violations = append(violations, graph.Violation{
 				Path:     "spec.replicas",
-				Message:  fmt.Sprintf("replicas must be non-negative, got %d", *replicas),
+				Message:  fmt.Sprintf("replicas must be non-negative, got %d", replicas),
 				Severity: "Error",
 			})
 		}
 
 		// Warn if replicas is very high
-		if *replicas > 10 {
+		if replicas > 10 {
 			violations = append(violations, graph.Violation{
 				Path:     "spec.replicas",
-				Message:  fmt.Sprintf("replicas (%d) is higher than recommended maximum (10)", *replicas),
+				Message:  fmt.Sprintf("replicas (%d) is higher than recommended maximum (10)", replicas),
 				Severity: "Warning",
 			})
 		}
 	}
 
 	return violations, nil
+}
+
+// getInt extracts an integer from various numeric types
+func getInt(v interface{}) (int, bool) {
+	switch val := v.(type) {
+	case int:
+		return val, true
+	case int32:
+		return int(val), true
+	case int64:
+		return int(val), true
+	case float64:
+		return int(val), true
+	default:
+		return 0, false
+	}
 }
 
 // ValidateOutput validates a rendered Graph against output policies

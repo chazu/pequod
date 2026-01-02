@@ -1,5 +1,5 @@
 /*
-Copyright 2024.
+Copyright 2025.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,11 +18,12 @@ package controller
 
 import (
 	"context"
-	"time"
+	"encoding/json"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -30,26 +31,26 @@ import (
 )
 
 var _ = Describe("Transform Controller", func() {
-	Context("When reconciling a WebService with transform label", func() {
+	Context("When reconciling a Transform", func() {
 		const (
-			webserviceName = "test-webservice-transform"
-			namespace      = "default"
+			transformName = "test-transform"
+			namespace     = "default"
 		)
 
 		ctx := context.Background()
 
 		typeNamespacedName := types.NamespacedName{
-			Name:      webserviceName,
+			Name:      transformName,
 			Namespace: namespace,
 		}
 
 		AfterEach(func() {
-			// Cleanup WebService
-			ws := &platformv1alpha1.WebService{}
-			err := k8sClient.Get(ctx, typeNamespacedName, ws)
+			// Cleanup Transform
+			tf := &platformv1alpha1.Transform{}
+			err := k8sClient.Get(ctx, typeNamespacedName, tf)
 			if err == nil {
-				By("Cleaning up the WebService")
-				Expect(k8sClient.Delete(ctx, ws)).To(Succeed())
+				By("Cleaning up the Transform")
+				Expect(k8sClient.Delete(ctx, tf)).To(Succeed())
 			}
 
 			// Cleanup any ResourceGraphs
@@ -57,29 +58,44 @@ var _ = Describe("Transform Controller", func() {
 			err = k8sClient.List(ctx, rgList, client.InNamespace(namespace))
 			if err == nil {
 				for _, rg := range rgList.Items {
-					Expect(k8sClient.Delete(ctx, &rg)).To(Succeed())
+					_ = k8sClient.Delete(ctx, &rg)
 				}
 			}
 		})
 
-		It("should create a ResourceGraph for WebService with transform label", func() {
-			By("Creating a WebService with transform label")
-			ws := &platformv1alpha1.WebService{
+		It("should create a ResourceGraph for Transform", func() {
+			By("Creating a Transform")
+
+			// Create input as RawExtension
+			// Note: Use explicit type to avoid JSON float conversion
+			type webServiceInput struct {
+				Image    string `json:"image"`
+				Port     int    `json:"port"`
+				Replicas int    `json:"replicas"`
+			}
+			inputData := webServiceInput{
+				Image:    "nginx:latest",
+				Port:     80,
+				Replicas: 2,
+			}
+			inputJSON, err := json.Marshal(inputData)
+			Expect(err).NotTo(HaveOccurred())
+
+			tf := &platformv1alpha1.Transform{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      webserviceName,
+					Name:      transformName,
 					Namespace: namespace,
-					Labels: map[string]string{
-						"pequod.io/transform": "true",
-					},
 				},
-				Spec: platformv1alpha1.WebServiceSpec{
-					Image:    "nginx:latest",
-					Port:     80,
-					Replicas: ptr(int32(2)),
+				Spec: platformv1alpha1.TransformSpec{
+					CueRef: platformv1alpha1.CueReference{
+						Type: platformv1alpha1.CueRefTypeEmbedded,
+						Ref:  "webservice",
+					},
+					Input: runtime.RawExtension{Raw: inputJSON},
 				},
 			}
 
-			Expect(k8sClient.Create(ctx, ws)).To(Succeed())
+			Expect(k8sClient.Create(ctx, tf)).To(Succeed())
 
 			By("Waiting for the ResourceGraph to be created")
 			Eventually(func() bool {
@@ -88,22 +104,22 @@ var _ = Describe("Transform Controller", func() {
 				if err != nil {
 					return false
 				}
-				// Check if any ResourceGraph was created for this WebService
+				// Check if any ResourceGraph was created for this Transform
 				for _, rg := range rgList.Items {
-					if rg.Spec.SourceRef.Name == webserviceName {
+					if rg.Spec.SourceRef.Name == transformName {
 						return true
 					}
 				}
 				return false
 			}, timeout, interval).Should(BeTrue())
 
-			By("Checking that the WebService status was updated")
+			By("Checking that the Transform status was updated")
 			Eventually(func() bool {
-				err := k8sClient.Get(ctx, typeNamespacedName, ws)
+				err := k8sClient.Get(ctx, typeNamespacedName, tf)
 				if err != nil {
 					return false
 				}
-				return ws.Status.ResourceGraphRef != nil
+				return tf.Status.ResourceGraphRef != nil
 			}, timeout, interval).Should(BeTrue())
 
 			By("Verifying the ResourceGraph has correct content")
@@ -112,7 +128,7 @@ var _ = Describe("Transform Controller", func() {
 
 			var rg *platformv1alpha1.ResourceGraph
 			for i := range rgList.Items {
-				if rgList.Items[i].Spec.SourceRef.Name == webserviceName {
+				if rgList.Items[i].Spec.SourceRef.Name == transformName {
 					rg = &rgList.Items[i]
 					break
 				}
@@ -120,50 +136,104 @@ var _ = Describe("Transform Controller", func() {
 
 			Expect(rg).NotTo(BeNil())
 			Expect(rg.Spec.Nodes).NotTo(BeEmpty())
-			Expect(rg.Spec.SourceRef.Kind).To(Equal("WebService"))
-			Expect(rg.Spec.SourceRef.Name).To(Equal(webserviceName))
+			Expect(rg.Spec.SourceRef.Kind).To(Equal("Transform"))
+			Expect(rg.Spec.SourceRef.Name).To(Equal(transformName))
 
 			// Check owner reference
 			Expect(rg.OwnerReferences).To(HaveLen(1))
-			Expect(rg.OwnerReferences[0].Kind).To(Equal("WebService"))
-			Expect(rg.OwnerReferences[0].Name).To(Equal(webserviceName))
+			Expect(rg.OwnerReferences[0].Kind).To(Equal("Transform"))
+			Expect(rg.OwnerReferences[0].Name).To(Equal(transformName))
+
+			// Check labels
+			Expect(rg.Labels["pequod.io/transform"]).To(Equal(transformName))
+			Expect(rg.Labels["pequod.io/transform-type"]).To(Equal("webservice"))
 		})
 
-		It("should NOT process WebService without transform label", func() {
-			By("Creating a WebService WITHOUT transform label")
-			ws := &platformv1alpha1.WebService{
+		It("should update ResourceGraph when Transform input changes", func() {
+			By("Creating a Transform")
+
+			// Create input as RawExtension
+			// Note: Use explicit type to avoid JSON float conversion
+			type webServiceInput struct {
+				Image    string `json:"image"`
+				Port     int    `json:"port"`
+				Replicas int    `json:"replicas"`
+			}
+			inputData := webServiceInput{
+				Image:    "nginx:1.0",
+				Port:     80,
+				Replicas: 1,
+			}
+			inputJSON, err := json.Marshal(inputData)
+			Expect(err).NotTo(HaveOccurred())
+
+			tf := &platformv1alpha1.Transform{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      webserviceName + "-no-label",
+					Name:      transformName,
 					Namespace: namespace,
-					// No transform label
 				},
-				Spec: platformv1alpha1.WebServiceSpec{
-					Image: "nginx:latest",
-					Port:  80,
+				Spec: platformv1alpha1.TransformSpec{
+					CueRef: platformv1alpha1.CueReference{
+						Type: platformv1alpha1.CueRefTypeEmbedded,
+						Ref:  "webservice",
+					},
+					Input: runtime.RawExtension{Raw: inputJSON},
 				},
 			}
 
-			Expect(k8sClient.Create(ctx, ws)).To(Succeed())
+			Expect(k8sClient.Create(ctx, tf)).To(Succeed())
 
-			By("Waiting to ensure no ResourceGraph is created")
-			Consistently(func() bool {
+			By("Waiting for the initial ResourceGraph")
+			var initialHash string
+			Eventually(func() bool {
 				rgList := &platformv1alpha1.ResourceGraphList{}
 				err := k8sClient.List(ctx, rgList, client.InNamespace(namespace))
 				if err != nil {
 					return false
 				}
-				// Check that no ResourceGraph was created for this WebService
 				for _, rg := range rgList.Items {
-					if rg.Spec.SourceRef.Name == webserviceName+"-no-label" {
+					if rg.Spec.SourceRef.Name == transformName {
+						initialHash = rg.Spec.RenderHash
 						return true
 					}
 				}
 				return false
-			}, time.Second*3, interval).Should(BeFalse())
+			}, timeout, interval).Should(BeTrue())
 
-			// Cleanup
-			Expect(k8sClient.Delete(ctx, ws)).To(Succeed())
+			By("Updating the Transform input")
+			updatedInput := webServiceInput{
+				Image:    "nginx:2.0",
+				Port:     8080,
+				Replicas: 3,
+			}
+			updatedJSON, err := json.Marshal(updatedInput)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Retry the update to handle potential conflicts from controller status updates
+			Eventually(func() error {
+				// Re-fetch the latest version
+				latestTf := &platformv1alpha1.Transform{}
+				if err := k8sClient.Get(ctx, typeNamespacedName, latestTf); err != nil {
+					return err
+				}
+				latestTf.Spec.Input = runtime.RawExtension{Raw: updatedJSON}
+				return k8sClient.Update(ctx, latestTf)
+			}, timeout, interval).Should(Succeed())
+
+			By("Waiting for ResourceGraph to be updated with new hash")
+			Eventually(func() bool {
+				rgList := &platformv1alpha1.ResourceGraphList{}
+				err := k8sClient.List(ctx, rgList, client.InNamespace(namespace))
+				if err != nil {
+					return false
+				}
+				for _, rg := range rgList.Items {
+					if rg.Spec.SourceRef.Name == transformName && rg.Spec.RenderHash != initialHash {
+						return true
+					}
+				}
+				return false
+			}, timeout, interval).Should(BeTrue())
 		})
 	})
 })
-

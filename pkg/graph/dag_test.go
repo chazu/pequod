@@ -163,6 +163,139 @@ func TestBuildDAG(t *testing.T) {
 	}
 }
 
+// ============================================================================
+// Benchmarks
+// ============================================================================
+
+// createTestGraph creates a graph with n nodes in a chain: a -> b -> c -> ...
+func createLinearGraph(n int) *Graph {
+	nodes := make([]Node, n)
+	for i := 0; i < n; i++ {
+		id := string(rune('a' + i%26))
+		if i >= 26 {
+			id = string(rune('a'+i%26)) + string(rune('0'+i/26))
+		}
+		node := Node{
+			ID: id,
+			Object: unstructured.Unstructured{
+				Object: map[string]interface{}{
+					"apiVersion": "v1",
+					"kind":       "ConfigMap",
+					"metadata":   map[string]interface{}{"name": id},
+				},
+			},
+			ApplyPolicy: ApplyPolicy{Mode: ApplyModeApply},
+		}
+		if i > 0 {
+			prevID := string(rune('a' + (i-1)%26))
+			if i-1 >= 26 {
+				prevID = string(rune('a'+(i-1)%26)) + string(rune('0'+(i-1)/26))
+			}
+			node.DependsOn = []string{prevID}
+		}
+		nodes[i] = node
+	}
+	return &Graph{
+		Metadata: GraphMetadata{Name: "benchmark", Version: "v1"},
+		Nodes:    nodes,
+	}
+}
+
+// createWideGraph creates a graph with 1 root and n-1 leaves depending on it
+func createWideGraph(n int) *Graph {
+	nodes := make([]Node, n)
+	nodes[0] = Node{
+		ID: "root",
+		Object: unstructured.Unstructured{
+			Object: map[string]interface{}{
+				"apiVersion": "v1",
+				"kind":       "ConfigMap",
+				"metadata":   map[string]interface{}{"name": "root"},
+			},
+		},
+		ApplyPolicy: ApplyPolicy{Mode: ApplyModeApply},
+	}
+	for i := 1; i < n; i++ {
+		id := string(rune('a'+i%26)) + string(rune('0'+i/26))
+		nodes[i] = Node{
+			ID: id,
+			Object: unstructured.Unstructured{
+				Object: map[string]interface{}{
+					"apiVersion": "v1",
+					"kind":       "ConfigMap",
+					"metadata":   map[string]interface{}{"name": id},
+				},
+			},
+			ApplyPolicy: ApplyPolicy{Mode: ApplyModeApply},
+			DependsOn:   []string{"root"},
+		}
+	}
+	return &Graph{
+		Metadata: GraphMetadata{Name: "benchmark", Version: "v1"},
+		Nodes:    nodes,
+	}
+}
+
+func BenchmarkBuildDAG_10Nodes(b *testing.B) {
+	g := createLinearGraph(10)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = BuildDAG(g)
+	}
+}
+
+func BenchmarkBuildDAG_100Nodes(b *testing.B) {
+	g := createLinearGraph(100)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = BuildDAG(g)
+	}
+}
+
+func BenchmarkBuildDAG_WideGraph_100Nodes(b *testing.B) {
+	g := createWideGraph(100)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = BuildDAG(g)
+	}
+}
+
+func BenchmarkDAG_GetOrder_100Nodes(b *testing.B) {
+	g := createLinearGraph(100)
+	dag, _ := BuildDAG(g)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = dag.GetOrder()
+	}
+}
+
+func BenchmarkDAG_GetDependencies(b *testing.B) {
+	g := createLinearGraph(100)
+	dag, _ := BuildDAG(g)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = dag.GetDependencies("z3") // node in the middle
+	}
+}
+
+func BenchmarkDAG_GetRootNodes_100Nodes(b *testing.B) {
+	g := createWideGraph(100)
+	dag, _ := BuildDAG(g)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = dag.GetRootNodes()
+	}
+}
+
+func BenchmarkDAG_GetLeafNodes_100Nodes(b *testing.B) {
+	g := createWideGraph(100)
+	dag, _ := BuildDAG(g)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = dag.GetLeafNodes()
+	}
+}
+
 func TestDAGOperations(t *testing.T) {
 	// Create a test graph with known structure
 	// a -> b -> d

@@ -165,7 +165,6 @@ type PolicyViolation struct {
 	Severity string `json:"severity"`
 }
 
-
 // ResourceGraphStatus defines the execution state of the graph
 type ResourceGraphStatus struct {
 	// Phase indicates the overall execution phase
@@ -258,4 +257,3 @@ type ResourceGraphList struct {
 func init() {
 	SchemeBuilder.Register(&ResourceGraph{}, &ResourceGraphList{})
 }
-

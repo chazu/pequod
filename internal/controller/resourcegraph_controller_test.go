@@ -69,7 +69,6 @@ var _ = Describe("ResourceGraph Controller", func() {
 		})
 
 		It("should successfully reconcile a simple ResourceGraph", func() {
-			Skip("Skipping - ResourceGraph execution requires readiness checking which doesn't work in envtest")
 			By("Creating a ResourceGraph with a simple Deployment")
 
 			// Create a simple deployment object
@@ -116,8 +115,8 @@ var _ = Describe("ResourceGraph Controller", func() {
 				Spec: platformv1alpha1.ResourceGraphSpec{
 					SourceRef: platformv1alpha1.ObjectReference{
 						APIVersion: "platform.pequod.io/v1alpha1",
-						Kind:       "WebService",
-						Name:       "test-webservice",
+						Kind:       "Transform",
+						Name:       "test-transform",
 						Namespace:  namespace,
 					},
 					Metadata: platformv1alpha1.GraphMetadata{
@@ -168,7 +167,6 @@ var _ = Describe("ResourceGraph Controller", func() {
 		})
 
 		It("should handle ResourceGraph with multiple nodes", func() {
-			Skip("Skipping - ResourceGraph execution requires readiness checking which doesn't work in envtest")
 			By("Creating a ResourceGraph with Deployment and Service")
 
 			// Create deployment
@@ -238,8 +236,8 @@ var _ = Describe("ResourceGraph Controller", func() {
 				Spec: platformv1alpha1.ResourceGraphSpec{
 					SourceRef: platformv1alpha1.ObjectReference{
 						APIVersion: "platform.pequod.io/v1alpha1",
-						Kind:       "WebService",
-						Name:       "test-webservice-multi",
+						Kind:       "Transform",
+						Name:       "test-transform-multi",
 						Namespace:  namespace,
 					},
 					Metadata: platformv1alpha1.GraphMetadata{

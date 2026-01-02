@@ -117,4 +117,3 @@ func (p *Pequod) CI(ctx context.Context, source *Directory) (string, error) {
 
 	return fmt.Sprintf("✅ All CI checks passed\n\nTests:\n%s\n\nLint:\n%s", testOutput, lintOutput), nil
 }
-

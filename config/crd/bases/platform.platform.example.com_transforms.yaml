@@ -4,20 +4,32 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.19.0
-  name: webservices.platform.platform.example.com
+  name: transforms.platform.platform.example.com
 spec:
   group: platform.platform.example.com
   names:
-    kind: WebService
-    listKind: WebServiceList
-    plural: webservices
-    singular: webservice
+    kind: Transform
+    listKind: TransformList
+    plural: transforms
+    shortNames:
+    - tf
+    singular: transform
   scope: Namespaced
   versions:
-  - name: v1alpha1
+  - additionalPrinterColumns:
+    - jsonPath: .spec.cueRef.ref
+      name: CueRef
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: WebService is the Schema for the webservices API
+        description: |-
+          Transform is the Schema for the transforms API
+          Transform is the single user-facing CRD for all platform types.
+          Platform definitions (WebService, Database, Queue, etc.) are CUE artifacts, not separate CRDs.
         properties:
           apiVersion:
             description: |-
@@ -37,74 +49,99 @@ spec:
           metadata:
             type: object
           spec:
-            description: spec defines the desired state of WebService
+            description: TransformSpec defines the desired state of Transform
             properties:
-              envFrom:
-                description: |-
-                  EnvFrom specifies sources to populate environment variables in the container
-                  This allows referencing existing Secrets and ConfigMaps
-                items:
-                  description: EnvFromSource represents a source for environment variables
-                  properties:
-                    configMapRef:
-                      description: ConfigMapRef references a ConfigMap in the same
-                        namespace
+              adopt:
+                description: Adopt specifies existing resources to adopt into management
+                properties:
+                  resources:
+                    description: Resources lists specific resources to adopt
+                    items:
+                      description: AdoptedResourceRef identifies a resource to adopt
                       properties:
+                        apiVersion:
+                          description: APIVersion of the resource to adopt
+                          type: string
+                        kind:
+                          description: Kind of the resource to adopt
+                          type: string
                         name:
-                          description: Name of the ConfigMap
-                          minLength: 1
+                          description: Name of the resource to adopt
+                          type: string
+                        namespace:
+                          description: Namespace of the resource to adopt (empty for
+                            cluster-scoped)
                           type: string
                       required:
+                      - apiVersion
+                      - kind
                       - name
                       type: object
-                    secretRef:
-                      description: SecretRef references a Secret in the same namespace
-                      properties:
-                        name:
-                          description: Name of the Secret
-                          minLength: 1
-                          type: string
-                      required:
-                      - name
-                      type: object
-                  type: object
-                type: array
-              image:
-                description: Image is the container image to deploy
-                minLength: 1
-                type: string
-              platformRef:
-                default: embedded
+                    type: array
+                type: object
+              cueRef:
+                description: CueRef specifies how to locate the CUE platform module
+                properties:
+                  path:
+                    description: |-
+                      Path is the path within the CUE module to the platform definition
+                      Used for git and oci types when the module contains multiple platforms
+                    type: string
+                  pullSecretRef:
+                    description: |-
+                      PullSecretRef references a Secret containing credentials for private OCI/Git
+                      The secret should contain keys like "username", "password" or ".dockerconfigjson"
+                    properties:
+                      name:
+                        description: Name of the referent
+                        minLength: 1
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  ref:
+                    description: |-
+                      Ref is the reference to the CUE module
+                      For oci: "ghcr.io/org/platforms/webservice:v1.0.0"
+                      For git: "https://github.com/org/platforms.git?ref=v1.0.0"
+                      For configmap: "my-platform-configmap"
+                      For inline: the CUE code itself
+                      For embedded: the platform type name (e.g., "webservice")
+                    minLength: 1
+                    type: string
+                  type:
+                    description: Type specifies the source type for the CUE module
+                    enum:
+                    - oci
+                    - git
+                    - configmap
+                    - inline
+                    - embedded
+                    type: string
+                required:
+                - ref
+                - type
+                type: object
+              input:
                 description: |-
-                  PlatformRef references the platform module to use for rendering
-                  For now, only embedded version is supported
-                type: string
-              port:
-                description: Port is the service port to expose
-                format: int32
-                maximum: 65535
-                minimum: 1
-                type: integer
-              replicas:
-                description: |-
-                  Replicas is the number of replicas to deploy
-                  If not specified, the default from the platform policy will be used
-                format: int32
-                minimum: 0
-                type: integer
+                  Input is the free-form input data for the CUE platform module
+                  This will be validated against the CUE schema defined in the platform module
+                type: object
+                x-kubernetes-preserve-unknown-fields: true
             required:
-            - image
-            - port
+            - cueRef
+            - input
             type: object
           status:
-            description: status defines the observed state of WebService
+            description: TransformStatus defines the observed state of Transform
             properties:
               conditions:
                 description: |-
-                  Conditions represent the current state of the WebService resource.
+                  Conditions represent the current state of the Transform
                   Condition types include:
+                  - "CueFetched": CUE module fetched successfully
+                  - "Validated": Input validated against CUE schema
                   - "Rendered": ResourceGraph created successfully
-                  - "PolicyPassed": Policy validation succeeded
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -168,10 +205,22 @@ spec:
                   controller
                 format: int64
                 type: integer
+              resolvedCueRef:
+                description: ResolvedCueRef contains the resolved CUE module reference
+                properties:
+                  digest:
+                    description: |-
+                      Digest is the content hash of the resolved CUE module
+                      For OCI this is the manifest digest, for Git the commit SHA
+                    type: string
+                  fetchedAt:
+                    description: FetchedAt is when the module was last fetched
+                    format: date-time
+                    type: string
+                type: object
               resourceGraphRef:
-                description: |-
-                  ResourceGraphRef references the current ResourceGraph created from this WebService
-                  The ResourceGraph contains the rendered resources and execution state
+                description: ResourceGraphRef references the ResourceGraph created
+                  from this Transform
                 properties:
                   apiVersion:
                     description: APIVersion of the referent
@@ -194,8 +243,6 @@ spec:
                 - name
                 type: object
             type: object
-        required:
-        - spec
         type: object
     served: true
     storage: true
