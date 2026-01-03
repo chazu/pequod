@@ -6,6 +6,13 @@ metadata:
 rules:
 - apiGroups:
   - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
+  - ""
   - apps
   - batch
   resources:

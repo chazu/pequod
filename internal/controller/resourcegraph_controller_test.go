@@ -19,56 +19,54 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	platformv1alpha1 "github.com/chazu/pequod/api/v1alpha1"
 )
 
 const (
-	timeout  = time.Second * 30
+	timeout  = time.Second * 60
 	interval = time.Millisecond * 250
 )
 
-var _ = Describe("ResourceGraph Controller", func() {
+var _ = Describe("ResourceGraph Controller", Ordered, func() {
 	Context("When reconciling a ResourceGraph", func() {
-		const (
-			resourceGraphName = "test-resourcegraph"
-			namespace         = "default"
-		)
-
+		const namespace = "default"
 		ctx := context.Background()
 
-		typeNamespacedName := types.NamespacedName{
-			Name:      resourceGraphName,
-			Namespace: namespace,
+		// Helper to delete and wait for resource to be gone
+		deleteAndWait := func(obj client.Object, key types.NamespacedName) {
+			err := k8sClient.Get(ctx, key, obj)
+			if err != nil {
+				return // Already gone
+			}
+
+			// Delete with background propagation to let finalizers run
+			Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, obj))).To(Succeed())
+
+			// Wait for the resource to be fully deleted
+			Eventually(func() bool {
+				err := k8sClient.Get(ctx, key, obj)
+				return errors.IsNotFound(err)
+			}, timeout, interval).Should(BeTrue())
 		}
 
-		AfterEach(func() {
-			// Cleanup resources
-			resourceGraph := &platformv1alpha1.ResourceGraph{}
-			err := k8sClient.Get(ctx, typeNamespacedName, resourceGraph)
-			if err == nil {
-				By("Cleaning up the ResourceGraph")
-				Expect(k8sClient.Delete(ctx, resourceGraph)).To(Succeed())
-			}
-
-			// Cleanup any created deployments
-			deployment := &appsv1.Deployment{}
-			err = k8sClient.Get(ctx, types.NamespacedName{Name: "test-deployment", Namespace: namespace}, deployment)
-			if err == nil {
-				Expect(k8sClient.Delete(ctx, deployment)).To(Succeed())
-			}
-		})
-
 		It("should successfully reconcile a simple ResourceGraph", func() {
+			// Use unique names for this test
+			resourceGraphName := fmt.Sprintf("test-rg-simple-%d", GinkgoRandomSeed())
+			deploymentName := fmt.Sprintf("test-deploy-simple-%d", GinkgoRandomSeed())
+
 			By("Creating a ResourceGraph with a simple Deployment")
 
 			// Create a simple deployment object
@@ -78,7 +76,7 @@ var _ = Describe("ResourceGraph Controller", func() {
 					Kind:       "Deployment",
 				},
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-deployment",
+					Name:      deploymentName,
 					Namespace: namespace,
 				},
 				Spec: appsv1.DeploymentSpec{
@@ -145,28 +143,43 @@ var _ = Describe("ResourceGraph Controller", func() {
 
 			Expect(k8sClient.Create(ctx, resourceGraph)).To(Succeed())
 
+			// Cleanup deferred to ensure it runs even if test fails
+			defer func() {
+				By("Cleaning up the ResourceGraph")
+				deleteAndWait(&platformv1alpha1.ResourceGraph{}, types.NamespacedName{Name: resourceGraphName, Namespace: namespace})
+				By("Cleaning up the Deployment")
+				deleteAndWait(&appsv1.Deployment{}, types.NamespacedName{Name: deploymentName, Namespace: namespace})
+			}()
+
 			By("Waiting for the ResourceGraph to be reconciled automatically")
 			// The controller will reconcile automatically, no need to manually trigger
 
 			By("Checking that the ResourceGraph status was updated")
 			Eventually(func() bool {
-				err := k8sClient.Get(ctx, typeNamespacedName, resourceGraph)
+				rg := &platformv1alpha1.ResourceGraph{}
+				err := k8sClient.Get(ctx, types.NamespacedName{Name: resourceGraphName, Namespace: namespace}, rg)
 				if err != nil {
 					return false
 				}
 				// Check that phase is set
-				return resourceGraph.Status.Phase != ""
+				return rg.Status.Phase != ""
 			}, timeout, interval).Should(BeTrue())
 
 			By("Checking that the Deployment was created")
 			Eventually(func() bool {
-				deployment := &appsv1.Deployment{}
-				err := k8sClient.Get(ctx, types.NamespacedName{Name: "test-deployment", Namespace: namespace}, deployment)
+				dep := &appsv1.Deployment{}
+				err := k8sClient.Get(ctx, types.NamespacedName{Name: deploymentName, Namespace: namespace}, dep)
 				return err == nil
 			}, timeout, interval).Should(BeTrue())
 		})
 
 		It("should handle ResourceGraph with multiple nodes", func() {
+			// Use unique names for this test
+			resourceGraphName := fmt.Sprintf("test-rg-multi-%d", GinkgoRandomSeed())
+			deploymentName := fmt.Sprintf("test-deploy-multi-%d", GinkgoRandomSeed())
+			serviceName := fmt.Sprintf("test-svc-multi-%d", GinkgoRandomSeed())
+			appLabel := fmt.Sprintf("test-multi-%d", GinkgoRandomSeed())
+
 			By("Creating a ResourceGraph with Deployment and Service")
 
 			// Create deployment
@@ -176,18 +189,18 @@ var _ = Describe("ResourceGraph Controller", func() {
 					Kind:       "Deployment",
 				},
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-deployment-multi",
+					Name:      deploymentName,
 					Namespace: namespace,
-					Labels:    map[string]string{"app": "test-multi"},
+					Labels:    map[string]string{"app": appLabel},
 				},
 				Spec: appsv1.DeploymentSpec{
 					Replicas: ptr(int32(1)),
 					Selector: &metav1.LabelSelector{
-						MatchLabels: map[string]string{"app": "test-multi"},
+						MatchLabels: map[string]string{"app": appLabel},
 					},
 					Template: corev1.PodTemplateSpec{
 						ObjectMeta: metav1.ObjectMeta{
-							Labels: map[string]string{"app": "test-multi"},
+							Labels: map[string]string{"app": appLabel},
 						},
 						Spec: corev1.PodSpec{
 							Containers: []corev1.Container{
@@ -211,11 +224,11 @@ var _ = Describe("ResourceGraph Controller", func() {
 					Kind:       "Service",
 				},
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-service-multi",
+					Name:      serviceName,
 					Namespace: namespace,
 				},
 				Spec: corev1.ServiceSpec{
-					Selector: map[string]string{"app": "test-multi"},
+					Selector: map[string]string{"app": appLabel},
 					Ports: []corev1.ServicePort{
 						{
 							Port: 80,
@@ -230,7 +243,7 @@ var _ = Describe("ResourceGraph Controller", func() {
 			// Create ResourceGraph with both nodes
 			resourceGraph := &platformv1alpha1.ResourceGraph{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      resourceGraphName + "-multi",
+					Name:      resourceGraphName,
 					Namespace: namespace,
 				},
 				Spec: platformv1alpha1.ResourceGraphSpec{
@@ -270,6 +283,16 @@ var _ = Describe("ResourceGraph Controller", func() {
 
 			Expect(k8sClient.Create(ctx, resourceGraph)).To(Succeed())
 
+			// Cleanup deferred to ensure it runs even if test fails
+			defer func() {
+				By("Cleaning up the ResourceGraph")
+				deleteAndWait(&platformv1alpha1.ResourceGraph{}, types.NamespacedName{Name: resourceGraphName, Namespace: namespace})
+				By("Cleaning up the Deployment")
+				deleteAndWait(&appsv1.Deployment{}, types.NamespacedName{Name: deploymentName, Namespace: namespace})
+				By("Cleaning up the Service")
+				deleteAndWait(&corev1.Service{}, types.NamespacedName{Name: serviceName, Namespace: namespace})
+			}()
+
 			By("Waiting for the ResourceGraph to be reconciled automatically")
 			// The controller will reconcile automatically
 
@@ -277,13 +300,10 @@ var _ = Describe("ResourceGraph Controller", func() {
 			Eventually(func() bool {
 				dep := &appsv1.Deployment{}
 				svc := &corev1.Service{}
-				depErr := k8sClient.Get(ctx, types.NamespacedName{Name: "test-deployment-multi", Namespace: namespace}, dep)
-				svcErr := k8sClient.Get(ctx, types.NamespacedName{Name: "test-service-multi", Namespace: namespace}, svc)
+				depErr := k8sClient.Get(ctx, types.NamespacedName{Name: deploymentName, Namespace: namespace}, dep)
+				svcErr := k8sClient.Get(ctx, types.NamespacedName{Name: serviceName, Namespace: namespace}, svc)
 				return depErr == nil && svcErr == nil
 			}, timeout, interval).Should(BeTrue())
-
-			// Cleanup
-			Expect(k8sClient.Delete(ctx, resourceGraph)).To(Succeed())
 		})
 	})
 })

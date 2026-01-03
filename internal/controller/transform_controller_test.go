@@ -30,7 +30,7 @@ import (
 	platformv1alpha1 "github.com/chazu/pequod/api/v1alpha1"
 )
 
-var _ = Describe("Transform Controller", func() {
+var _ = Describe("Transform Controller", Ordered, func() {
 	Context("When reconciling a Transform", func() {
 		const (
 			transformName = "test-transform"

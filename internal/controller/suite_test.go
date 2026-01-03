@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -122,6 +123,13 @@ var _ = BeforeSuite(func() {
 		err = k8sManager.Start(ctx)
 		Expect(err).ToNot(HaveOccurred(), "failed to run manager")
 	}()
+
+	// Wait for the manager's caches to sync before running tests
+	// This ensures informers are ready and controllers can receive events
+	By("waiting for manager caches to sync")
+	Eventually(func() bool {
+		return k8sManager.GetCache().WaitForCacheSync(ctx)
+	}, 30*time.Second, 100*time.Millisecond).Should(BeTrue(), "caches did not sync in time")
 })
 
 var _ = AfterSuite(func() {

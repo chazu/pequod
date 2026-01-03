@@ -336,36 +336,48 @@ func (r *ResourceGraphReconciler) convertToInternalGraph(rg *platformv1alpha1.Re
 
 // updateStatusExecuting updates the ResourceGraph status to Executing
 func (r *ResourceGraphReconciler) updateStatusExecuting(ctx context.Context, rg *platformv1alpha1.ResourceGraph) error {
+	// Re-fetch the object to get the latest resourceVersion to avoid conflicts
+	latest := &platformv1alpha1.ResourceGraph{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(rg), latest); err != nil {
+		return fmt.Errorf("failed to get latest ResourceGraph: %w", err)
+	}
+
 	now := metav1.Now()
-	rg.Status.Phase = PhaseExecuting
-	rg.Status.StartedAt = &now
-	rg.Status.ObservedGeneration = rg.Generation
+	latest.Status.Phase = PhaseExecuting
+	latest.Status.StartedAt = &now
+	latest.Status.ObservedGeneration = latest.Generation
 
 	// Initialize node states
-	if rg.Status.NodeStates == nil {
-		rg.Status.NodeStates = make(map[string]platformv1alpha1.NodeExecutionState)
+	if latest.Status.NodeStates == nil {
+		latest.Status.NodeStates = make(map[string]platformv1alpha1.NodeExecutionState)
 	}
-	for _, node := range rg.Spec.Nodes {
-		if _, exists := rg.Status.NodeStates[node.ID]; !exists {
-			rg.Status.NodeStates[node.ID] = platformv1alpha1.NodeExecutionState{
+	for _, node := range latest.Spec.Nodes {
+		if _, exists := latest.Status.NodeStates[node.ID]; !exists {
+			latest.Status.NodeStates[node.ID] = platformv1alpha1.NodeExecutionState{
 				Phase:              PhasePending,
 				LastTransitionTime: &now,
 			}
 		}
 	}
 
-	return r.Status().Update(ctx, rg)
+	return r.Status().Update(ctx, latest)
 }
 
 // updateStatusFailed updates the ResourceGraph status to Failed
 func (r *ResourceGraphReconciler) updateStatusFailed(ctx context.Context, rg *platformv1alpha1.ResourceGraph, message string) (ctrl.Result, error) {
+	// Re-fetch the object to get the latest resourceVersion to avoid conflicts
+	latest := &platformv1alpha1.ResourceGraph{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(rg), latest); err != nil {
+		return ctrl.Result{Requeue: true}, fmt.Errorf("failed to get latest ResourceGraph: %w", err)
+	}
+
 	now := metav1.Now()
-	rg.Status.Phase = PhaseFailed
-	rg.Status.CompletedAt = &now
-	rg.Status.ObservedGeneration = rg.Generation
+	latest.Status.Phase = PhaseFailed
+	latest.Status.CompletedAt = &now
+	latest.Status.ObservedGeneration = latest.Generation
 
 	// Add condition
-	rg.Status.Conditions = []metav1.Condition{
+	latest.Status.Conditions = []metav1.Condition{
 		{
 			Type:               ConditionTypeFailed,
 			Status:             metav1.ConditionTrue,
@@ -375,7 +387,7 @@ func (r *ResourceGraphReconciler) updateStatusFailed(ctx context.Context, rg *pl
 		},
 	}
 
-	if err := r.Status().Update(ctx, rg); err != nil {
+	if err := r.Status().Update(ctx, latest); err != nil {
 		// Requeue to retry status update
 		return ctrl.Result{Requeue: true}, err
 	}
@@ -385,11 +397,17 @@ func (r *ResourceGraphReconciler) updateStatusFailed(ctx context.Context, rg *pl
 
 // updateStatusFromExecution updates the ResourceGraph status from execution state
 func (r *ResourceGraphReconciler) updateStatusFromExecution(ctx context.Context, rg *platformv1alpha1.ResourceGraph, state *graph.ExecutionState, success bool) (ctrl.Result, error) {
+	// Re-fetch the object to get the latest resourceVersion to avoid conflicts
+	latest := &platformv1alpha1.ResourceGraph{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(rg), latest); err != nil {
+		return ctrl.Result{Requeue: true}, fmt.Errorf("failed to get latest ResourceGraph: %w", err)
+	}
+
 	now := metav1.Now()
 
 	// Update node states
-	if rg.Status.NodeStates == nil {
-		rg.Status.NodeStates = make(map[string]platformv1alpha1.NodeExecutionState)
+	if latest.Status.NodeStates == nil {
+		latest.Status.NodeStates = make(map[string]platformv1alpha1.NodeExecutionState)
 	}
 
 	// Get all node states
@@ -418,14 +436,14 @@ func (r *ResourceGraphReconciler) updateStatusFromExecution(ctx context.Context,
 			execState.ReadyAt = &metav1.Time{Time: *nodeStatus.ReadyTime}
 		}
 
-		rg.Status.NodeStates[nodeID] = execState
+		latest.Status.NodeStates[nodeID] = execState
 	}
 
 	// Update overall phase
 	if success && state.IsComplete() {
-		rg.Status.Phase = PhaseCompleted
-		rg.Status.CompletedAt = &now
-		rg.Status.Conditions = []metav1.Condition{
+		latest.Status.Phase = PhaseCompleted
+		latest.Status.CompletedAt = &now
+		latest.Status.Conditions = []metav1.Condition{
 			{
 				Type:               ConditionTypeReady,
 				Status:             metav1.ConditionTrue,
@@ -435,9 +453,9 @@ func (r *ResourceGraphReconciler) updateStatusFromExecution(ctx context.Context,
 			},
 		}
 	} else {
-		rg.Status.Phase = PhaseFailed
-		rg.Status.CompletedAt = &now
-		rg.Status.Conditions = []metav1.Condition{
+		latest.Status.Phase = PhaseFailed
+		latest.Status.CompletedAt = &now
+		latest.Status.Conditions = []metav1.Condition{
 			{
 				Type:               ConditionTypeFailed,
 				Status:             metav1.ConditionTrue,
@@ -448,9 +466,9 @@ func (r *ResourceGraphReconciler) updateStatusFromExecution(ctx context.Context,
 		}
 	}
 
-	rg.Status.ObservedGeneration = rg.Generation
+	latest.Status.ObservedGeneration = latest.Generation
 
-	if err := r.Status().Update(ctx, rg); err != nil {
+	if err := r.Status().Update(ctx, latest); err != nil {
 		// Requeue to retry status update
 		return ctrl.Result{Requeue: true}, err
 	}
