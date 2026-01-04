@@ -20,9 +20,11 @@ resources:
 - metrics_reader_role.yaml
 # For each CRD, "Admin", "Editor" and "Viewer" roles are scaffolded by
 # default, aiding admins in cluster management. Those roles are
-# not used by the pequod itself. You can comment the following lines
-# if you do not want those helpers be installed with your Project.
-- webservice_admin_role.yaml
-- webservice_editor_role.yaml
-- webservice_viewer_role.yaml
+# not used by pequod itself. Uncomment when needed:
+# - transform_admin_role.yaml
+# - transform_editor_role.yaml
+# - transform_viewer_role.yaml
+# - resourcegraph_admin_role.yaml
+# - resourcegraph_editor_role.yaml
+# - resourcegraph_viewer_role.yaml
 

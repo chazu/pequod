@@ -42,6 +42,11 @@ type ResourceGraphSpec struct {
 	// +optional
 	Violations []PolicyViolation `json:"violations,omitempty"`
 
+	// Adopt specifies existing resources to adopt into management
+	// Copied from the source Transform's adopt spec
+	// +optional
+	Adopt *AdoptSpec `json:"adopt,omitempty"`
+
 	// RenderHash is a hash of the rendered graph for change detection
 	// +kubebuilder:validation:Required
 	RenderHash string `json:"renderHash"`
@@ -199,7 +204,7 @@ type ResourceGraphStatus struct {
 // NodeExecutionState tracks the execution state of a single node
 type NodeExecutionState struct {
 	// Phase indicates the node's execution phase
-	// +kubebuilder:validation:Enum=Pending;Applying;WaitingReady;Ready;Error
+	// +kubebuilder:validation:Enum=Pending;Applying;WaitingReady;Ready;Error;Adopted
 	// +kubebuilder:validation:Required
 	Phase string `json:"phase"`
 
@@ -222,6 +227,18 @@ type NodeExecutionState struct {
 	// ReadyAt is when the resource became ready
 	// +optional
 	ReadyAt *metav1.Time `json:"readyAt,omitempty"`
+
+	// AdoptedAt is when the resource was adopted (if applicable)
+	// +optional
+	AdoptedAt *metav1.Time `json:"adoptedAt,omitempty"`
+
+	// Adopted indicates whether this resource was adopted (vs created)
+	// +optional
+	Adopted bool `json:"adopted,omitempty"`
+
+	// PreviousManagers lists field managers before adoption
+	// +optional
+	PreviousManagers []string `json:"previousManagers,omitempty"`
 
 	// ResourceRef contains the reference to the applied resource
 	// +optional

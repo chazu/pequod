@@ -85,15 +85,56 @@ type ResolvedCueReference struct {
 	FetchedAt *metav1.Time `json:"fetchedAt,omitempty"`
 }
 
+// AdoptMode defines how resources are selected for adoption
+// +kubebuilder:validation:Enum=Explicit;LabelSelector
+type AdoptMode string
+
+const (
+	// AdoptModeExplicit requires resources to be explicitly listed
+	AdoptModeExplicit AdoptMode = "Explicit"
+	// AdoptModeLabelSelector selects resources by label (future)
+	AdoptModeLabelSelector AdoptMode = "LabelSelector"
+)
+
+// AdoptStrategy defines how adopted resources are managed
+// +kubebuilder:validation:Enum=TakeOwnership;Mirror
+type AdoptStrategy string
+
+const (
+	// AdoptStrategyTakeOwnership adopts resources by taking full ownership with SSA
+	AdoptStrategyTakeOwnership AdoptStrategy = "TakeOwnership"
+	// AdoptStrategyMirror mirrors the resource state without full ownership
+	AdoptStrategyMirror AdoptStrategy = "Mirror"
+)
+
 // AdoptSpec defines resources to adopt into management
 type AdoptSpec struct {
-	// Resources lists specific resources to adopt
+	// Mode specifies how resources are selected for adoption
+	// +kubebuilder:default=Explicit
+	// +optional
+	Mode AdoptMode `json:"mode,omitempty"`
+
+	// Strategy specifies how adopted resources are managed
+	// +kubebuilder:default=TakeOwnership
+	// +optional
+	Strategy AdoptStrategy `json:"strategy,omitempty"`
+
+	// Resources lists specific resources to adopt (used when Mode=Explicit)
 	// +optional
 	Resources []AdoptedResourceRef `json:"resources,omitempty"`
+
+	// LabelSelector selects resources to adopt by labels (used when Mode=LabelSelector)
+	// +optional
+	LabelSelector *metav1.LabelSelector `json:"labelSelector,omitempty"`
 }
 
 // AdoptedResourceRef identifies a resource to adopt
 type AdoptedResourceRef struct {
+	// NodeID is the ID of the graph node this resource maps to
+	// If empty, the system will try to match by GVK/namespace/name
+	// +optional
+	NodeID string `json:"nodeId,omitempty"`
+
 	// APIVersion of the resource to adopt
 	// +kubebuilder:validation:Required
 	APIVersion string `json:"apiVersion"`

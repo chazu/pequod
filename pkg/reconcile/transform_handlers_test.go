@@ -1086,3 +1086,194 @@ func TestTransformHandlers_ConcurrentReconciliation_WithDeletion(t *testing.T) {
 		t.Error("should not requeue for deleted resource")
 	}
 }
+
+// ============================================================================
+// Cleanup and Size Warning Tests
+// ============================================================================
+
+func TestTransformHandlers_CleanupsOldResourceGraphs(t *testing.T) {
+	// Setup: Transform with finalizer
+	tf := &platformv1alpha1.Transform{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "cleanup-test",
+			Namespace:  "default",
+			Finalizers: []string{TransformFinalizer},
+			UID:        "cleanup-uid-123",
+		},
+		Spec: platformv1alpha1.TransformSpec{
+			CueRef: platformv1alpha1.CueReference{
+				Type: platformv1alpha1.CueRefTypeEmbedded,
+				Ref:  "webservice",
+			},
+			Input: runtime.RawExtension{
+				Raw: []byte(`{"image": "nginx:v1", "port": 80}`),
+			},
+		},
+	}
+
+	c := newTestClient(tf)
+	handlers := newTestHandlers(c)
+
+	nn := types.NamespacedName{
+		Name:      "cleanup-test",
+		Namespace: "default",
+	}
+
+	// First reconcile to create initial ResourceGraph
+	_, err := handlers.Reconcile(context.Background(), nn)
+	if err != nil {
+		t.Fatalf("first reconcile failed: %v", err)
+	}
+
+	// Get the first ResourceGraph
+	rgList := &platformv1alpha1.ResourceGraphList{}
+	if err := c.List(context.Background(), rgList, client.InNamespace("default")); err != nil {
+		t.Fatalf("failed to list ResourceGraphs: %v", err)
+	}
+	if len(rgList.Items) != 1 {
+		t.Fatalf("expected 1 ResourceGraph, got %d", len(rgList.Items))
+	}
+	firstRGName := rgList.Items[0].Name
+
+	// Update Transform input to cause a different hash
+	updated := &platformv1alpha1.Transform{}
+	if err := c.Get(context.Background(), nn, updated); err != nil {
+		t.Fatalf("failed to get transform: %v", err)
+	}
+	updated.Spec.Input = runtime.RawExtension{
+		Raw: []byte(`{"image": "nginx:v2", "port": 8080}`),
+	}
+	if err := c.Update(context.Background(), updated); err != nil {
+		t.Fatalf("failed to update transform: %v", err)
+	}
+
+	// Second reconcile should create new ResourceGraph and cleanup old one
+	_, err = handlers.Reconcile(context.Background(), nn)
+	if err != nil {
+		t.Fatalf("second reconcile failed: %v", err)
+	}
+
+	// Should now have only 1 ResourceGraph (old one cleaned up)
+	if err := c.List(context.Background(), rgList, client.InNamespace("default")); err != nil {
+		t.Fatalf("failed to list ResourceGraphs after cleanup: %v", err)
+	}
+	if len(rgList.Items) != 1 {
+		t.Errorf("expected 1 ResourceGraph after cleanup, got %d", len(rgList.Items))
+	}
+
+	// The ResourceGraph should have a different name (different hash)
+	if rgList.Items[0].Name == firstRGName {
+		t.Error("expected new ResourceGraph with different name after input change")
+	}
+}
+
+func TestTransformHandlers_CleanupDoesNotDeleteUnownedResourceGraphs(t *testing.T) {
+	// Setup: Transform and an unrelated ResourceGraph
+	tf := &platformv1alpha1.Transform{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "cleanup-owned-test",
+			Namespace:  "default",
+			Finalizers: []string{TransformFinalizer},
+			UID:        "owned-uid-123",
+		},
+		Spec: platformv1alpha1.TransformSpec{
+			CueRef: platformv1alpha1.CueReference{
+				Type: platformv1alpha1.CueRefTypeEmbedded,
+				Ref:  "webservice",
+			},
+			Input: runtime.RawExtension{
+				Raw: []byte(`{"image": "nginx:latest", "port": 80}`),
+			},
+		},
+	}
+
+	// Create an unrelated ResourceGraph with the same label but different owner
+	unrelatedRG := &platformv1alpha1.ResourceGraph{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "unrelated-rg",
+			Namespace: "default",
+			Labels: map[string]string{
+				"pequod.io/transform": "cleanup-owned-test", // Same label
+			},
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: "platform.pequod.io/v1alpha1",
+					Kind:       "Transform",
+					Name:       "other-transform",
+					UID:        "different-uid", // Different owner
+				},
+			},
+		},
+		Spec: platformv1alpha1.ResourceGraphSpec{
+			SourceRef: platformv1alpha1.ObjectReference{
+				APIVersion: "platform.pequod.io/v1alpha1",
+				Kind:       "Transform",
+				Name:       "other-transform",
+			},
+			Metadata: platformv1alpha1.GraphMetadata{
+				Name:    "unrelated",
+				Version: "v1",
+			},
+			Nodes: []platformv1alpha1.ResourceNode{
+				{
+					ID:          "dummy",
+					Object:      runtime.RawExtension{Raw: []byte(`{}`)},
+					ApplyPolicy: platformv1alpha1.ApplyPolicy{Mode: "Apply", ConflictPolicy: "Error"},
+				},
+			},
+			RenderHash: "unrelated-hash",
+			RenderedAt: metav1.Now(),
+		},
+	}
+
+	c := newTestClient(tf, unrelatedRG)
+	handlers := newTestHandlers(c)
+
+	nn := types.NamespacedName{
+		Name:      "cleanup-owned-test",
+		Namespace: "default",
+	}
+
+	// Reconcile the Transform
+	_, err := handlers.Reconcile(context.Background(), nn)
+	if err != nil {
+		t.Fatalf("reconcile failed: %v", err)
+	}
+
+	// The unrelated ResourceGraph should still exist
+	rgList := &platformv1alpha1.ResourceGraphList{}
+	if err := c.List(context.Background(), rgList, client.InNamespace("default")); err != nil {
+		t.Fatalf("failed to list ResourceGraphs: %v", err)
+	}
+
+	// Should have 2 ResourceGraphs: the unrelated one + the new one
+	if len(rgList.Items) != 2 {
+		t.Errorf("expected 2 ResourceGraphs (unrelated + new), got %d", len(rgList.Items))
+	}
+
+	// Verify unrelated RG still exists
+	unrelatedFound := false
+	for _, rg := range rgList.Items {
+		if rg.Name == "unrelated-rg" {
+			unrelatedFound = true
+			break
+		}
+	}
+	if !unrelatedFound {
+		t.Error("unrelated ResourceGraph should not have been deleted")
+	}
+}
+
+func TestTransformHandlers_SizeWarningConstants(t *testing.T) {
+	// Verify constants are sensible
+	if NodeCountWarningThreshold >= NodeCountMaxLimit {
+		t.Errorf("warning threshold (%d) should be less than max limit (%d)",
+			NodeCountWarningThreshold, NodeCountMaxLimit)
+	}
+	if NodeCountWarningThreshold < 50 {
+		t.Errorf("warning threshold (%d) seems too low", NodeCountWarningThreshold)
+	}
+	if NodeCountMaxLimit != 100 {
+		t.Errorf("max limit should match CRD validation (100), got %d", NodeCountMaxLimit)
+	}
+}

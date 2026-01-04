@@ -1,0 +1,95 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run tests before release
+        run: make test
+
+      - name: Generate release notes
+        id: release_notes
+        run: |
+          # Get the previous tag
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+
+          if [ -z "$PREV_TAG" ]; then
+            echo "notes=Initial release" >> $GITHUB_OUTPUT
+          else
+            # Generate changelog from commits
+            NOTES=$(git log ${PREV_TAG}..HEAD --pretty=format:"- %s" --no-merges | head -50)
+            # Use heredoc for multiline output
+            {
+              echo "notes<<EOF"
+              echo "$NOTES"
+              echo "EOF"
+            } >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build release binaries
+        run: |
+          mkdir -p dist
+
+          # Build for multiple platforms
+          GOOS=linux GOARCH=amd64 go build -o dist/pequod-linux-amd64 cmd/main.go
+          GOOS=linux GOARCH=arm64 go build -o dist/pequod-linux-arm64 cmd/main.go
+          GOOS=darwin GOARCH=amd64 go build -o dist/pequod-darwin-amd64 cmd/main.go
+          GOOS=darwin GOARCH=arm64 go build -o dist/pequod-darwin-arm64 cmd/main.go
+
+          # Create checksums
+          cd dist && sha256sum * > checksums.txt
+
+      - name: Generate install manifests
+        run: |
+          mkdir -p dist/manifests
+          kubectl kustomize config/default > dist/manifests/install.yaml
+          kubectl kustomize config/crd > dist/manifests/crds.yaml
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body: |
+            ## Changes
+            ${{ steps.release_notes.outputs.notes }}
+
+            ## Installation
+
+            ### Using Kustomize (Recommended)
+            ```bash
+            kubectl apply -k github.com/${{ github.repository }}/config/default?ref=${{ github.ref_name }}
+            ```
+
+            ### Using manifests
+            ```bash
+            kubectl apply -f https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/install.yaml
+            ```
+
+            ### Docker Image
+            ```bash
+            docker pull ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+            ```
+          files: |
+            dist/pequod-*
+            dist/checksums.txt
+            dist/manifests/*.yaml
+          generate_release_notes: true

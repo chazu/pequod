@@ -54,8 +54,63 @@ spec:
               adopt:
                 description: Adopt specifies existing resources to adopt into management
                 properties:
+                  labelSelector:
+                    description: LabelSelector selects resources to adopt by labels
+                      (used when Mode=LabelSelector)
+                    properties:
+                      matchExpressions:
+                        description: matchExpressions is a list of label selector
+                          requirements. The requirements are ANDed.
+                        items:
+                          description: |-
+                            A label selector requirement is a selector that contains values, a key, and an operator that
+                            relates the key and values.
+                          properties:
+                            key:
+                              description: key is the label key that the selector
+                                applies to.
+                              type: string
+                            operator:
+                              description: |-
+                                operator represents a key's relationship to a set of values.
+                                Valid operators are In, NotIn, Exists and DoesNotExist.
+                              type: string
+                            values:
+                              description: |-
+                                values is an array of string values. If the operator is In or NotIn,
+                                the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                the values array must be empty. This array is replaced during a strategic
+                                merge patch.
+                              items:
+                                type: string
+                              type: array
+                              x-kubernetes-list-type: atomic
+                          required:
+                          - key
+                          - operator
+                          type: object
+                        type: array
+                        x-kubernetes-list-type: atomic
+                      matchLabels:
+                        additionalProperties:
+                          type: string
+                        description: |-
+                          matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                          map is equivalent to an element of matchExpressions, whose key field is "key", the
+                          operator is "In", and the values array contains only "value". The requirements are ANDed.
+                        type: object
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  mode:
+                    default: Explicit
+                    description: Mode specifies how resources are selected for adoption
+                    enum:
+                    - Explicit
+                    - LabelSelector
+                    type: string
                   resources:
-                    description: Resources lists specific resources to adopt
+                    description: Resources lists specific resources to adopt (used
+                      when Mode=Explicit)
                     items:
                       description: AdoptedResourceRef identifies a resource to adopt
                       properties:
@@ -72,12 +127,24 @@ spec:
                           description: Namespace of the resource to adopt (empty for
                             cluster-scoped)
                           type: string
+                        nodeId:
+                          description: |-
+                            NodeID is the ID of the graph node this resource maps to
+                            If empty, the system will try to match by GVK/namespace/name
+                          type: string
                       required:
                       - apiVersion
                       - kind
                       - name
                       type: object
                     type: array
+                  strategy:
+                    default: TakeOwnership
+                    description: Strategy specifies how adopted resources are managed
+                    enum:
+                    - TakeOwnership
+                    - Mirror
+                    type: string
                 type: object
               cueRef:
                 description: CueRef specifies how to locate the CUE platform module

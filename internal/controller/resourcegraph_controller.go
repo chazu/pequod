@@ -59,6 +59,7 @@ type ResourceGraphReconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme
 	Applier  *apply.Applier
+	Adopter  *apply.Adopter
 	Checker  *readiness.Checker
 	Executor *graph.Executor
 	Recorder record.EventRecorder
@@ -81,22 +82,34 @@ const DefaultRequeueInterval = 5 * time.Second
 
 // Reconcile executes the ResourceGraph by applying all nodes in dependency order
 func (r *ResourceGraphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	startTime := time.Now()
 	logger := logf.FromContext(ctx)
 	logger.Info("Reconciling ResourceGraph", "name", req.Name, "namespace", req.Namespace)
+
+	// Defer metrics recording
+	var result string
+	defer func() {
+		duration := time.Since(startTime).Seconds()
+		RecordReconcile("resourcegraph", result, duration)
+	}()
 
 	// Fetch the ResourceGraph
 	rg := &platformv1alpha1.ResourceGraph{}
 	if err := r.Get(ctx, req.NamespacedName, rg); err != nil {
 		if errors.IsNotFound(err) {
 			logger.Info("ResourceGraph not found, ignoring")
+			result = "not_found"
 			return ctrl.Result{}, nil
 		}
 		logger.Error(err, "Failed to get ResourceGraph")
+		result = "error"
+		RecordReconcileError("resourcegraph", "get_failed")
 		return ctrl.Result{}, err
 	}
 
 	// Handle deletion
 	if !rg.DeletionTimestamp.IsZero() {
+		result = "deleted"
 		return r.handleDeletion(ctx, rg)
 	}
 
@@ -105,8 +118,11 @@ func (r *ResourceGraphReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		controllerutil.AddFinalizer(rg, resourceGraphFinalizer)
 		if err := r.Update(ctx, rg); err != nil {
 			logger.Error(err, "Failed to add finalizer")
+			result = "error"
+			RecordReconcileError("resourcegraph", "finalizer_failed")
 			return ctrl.Result{}, err
 		}
+		result = "requeue"
 		return ctrl.Result{Requeue: true}, nil
 	}
 
@@ -115,6 +131,7 @@ func (r *ResourceGraphReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		// Allow re-execution if the spec has changed (generation mismatch)
 		if rg.Status.ObservedGeneration == rg.Generation {
 			logger.Info("ResourceGraph already in terminal state", "phase", rg.Status.Phase)
+			result = "terminal"
 			return ctrl.Result{}, nil
 		}
 		// Spec changed since last execution - allow re-execution
@@ -126,7 +143,15 @@ func (r *ResourceGraphReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	// Execute the graph
-	return r.executeGraph(ctx, rg)
+	ctrlResult, err := r.executeGraph(ctx, rg)
+	if err != nil {
+		result = "error"
+	} else if ctrlResult.Requeue || ctrlResult.RequeueAfter > 0 {
+		result = "requeue"
+	} else {
+		result = "success"
+	}
+	return ctrlResult, err
 }
 
 // executeGraph executes the ResourceGraph by building a DAG and applying resources
@@ -165,23 +190,145 @@ func (r *ResourceGraphReconciler) executeGraph(ctx context.Context, rg *platform
 		return ctrl.Result{Requeue: true}, err
 	}
 
+	// Run adoption phase before DAG execution
+	if rg.Spec.Adopt != nil && len(rg.Spec.Adopt.Resources) > 0 {
+		adoptionReport, err := r.runAdoption(ctx, rg, internalGraph.Nodes)
+		if err != nil {
+			logger.Error(err, "Adoption phase failed")
+			r.recordEvent(rg, "Warning", "AdoptionFailed", fmt.Sprintf("Adoption failed: %v", err))
+			// Continue with execution - adoption failures are not blocking
+		} else if adoptionReport != nil {
+			r.recordAdoptionEvents(rg, adoptionReport)
+			if err := r.updateStatusWithAdoption(ctx, rg, adoptionReport); err != nil {
+				logger.Error(err, "Failed to update status with adoption results")
+			}
+		}
+	}
+
 	// Record execution start event
 	r.recordEvent(rg, "Normal", "ExecutionStarted", fmt.Sprintf("Starting execution of %d nodes", len(internalGraph.Nodes)))
 
-	// Execute the DAG
+	// Record DAG node count metric
+	SetDAGNodes(rg.Name, len(internalGraph.Nodes))
+
+	// Execute the DAG with timing
+	dagStartTime := time.Now()
 	logger.Info("Executing DAG", "nodeCount", len(internalGraph.Nodes))
 	executionState, err := r.Executor.Execute(ctx, dag)
+	dagDuration := time.Since(dagStartTime).Seconds()
+
 	if err != nil {
 		logger.Error(err, "DAG execution failed")
 		r.recordEvent(rg, "Warning", "ExecutionFailed", fmt.Sprintf("DAG execution failed: %v", err))
+		RecordDAGExecution(rg.Name, "failed", dagDuration)
 		return r.updateStatusFromExecution(ctx, rg, executionState, false)
 	}
 
-	// Record success event
+	// Record success event and metrics
 	r.recordEvent(rg, "Normal", "ExecutionCompleted", fmt.Sprintf("Successfully applied %d resources", len(internalGraph.Nodes)))
+	RecordDAGExecution(rg.Name, "success", dagDuration)
 
 	// Update status from execution state
 	return r.updateStatusFromExecution(ctx, rg, executionState, true)
+}
+
+// runAdoption executes the adoption phase
+func (r *ResourceGraphReconciler) runAdoption(
+	ctx context.Context,
+	rg *platformv1alpha1.ResourceGraph,
+	nodes []graph.Node,
+) (*apply.AdoptionReport, error) {
+	logger := logf.FromContext(ctx)
+	logger.Info("Running adoption phase", "resourceCount", len(rg.Spec.Adopt.Resources))
+
+	adoptionStart := time.Now()
+	report, err := r.Adopter.Adopt(ctx, rg.Spec.Adopt, nodes)
+	adoptionDuration := time.Since(adoptionStart).Seconds()
+
+	if err != nil {
+		RecordAdoption("error", adoptionDuration)
+		return nil, fmt.Errorf("adoption failed: %w", err)
+	}
+
+	// Record adoption metrics
+	if report.TotalFailed > 0 {
+		RecordAdoption("partial", adoptionDuration)
+	} else {
+		RecordAdoption("success", adoptionDuration)
+	}
+
+	logger.Info("Adoption phase completed",
+		"adopted", report.TotalAdopted,
+		"failed", report.TotalFailed,
+		"skipped", report.TotalSkipped,
+		"created", report.TotalCreated)
+
+	return report, nil
+}
+
+// recordAdoptionEvents records events for adoption results
+func (r *ResourceGraphReconciler) recordAdoptionEvents(rg *platformv1alpha1.ResourceGraph, report *apply.AdoptionReport) {
+	for _, result := range report.Results {
+		if result.Error != nil {
+			r.recordEvent(rg, "Warning", "AdoptionFailed",
+				fmt.Sprintf("Failed to adopt %s: %v", result.Resource.String(), result.Error))
+		} else if result.Adopted {
+			eventType := "Normal"
+			reason := "ResourceAdopted"
+			message := fmt.Sprintf("Adopted %s", result.Resource.String())
+			if result.Created {
+				reason = "ResourceCreated"
+				message = fmt.Sprintf("Created %s (was missing)", result.Resource.String())
+			}
+			r.recordEvent(rg, eventType, reason, message)
+		}
+	}
+}
+
+// updateStatusWithAdoption updates the ResourceGraph status with adoption results
+func (r *ResourceGraphReconciler) updateStatusWithAdoption(
+	ctx context.Context,
+	rg *platformv1alpha1.ResourceGraph,
+	report *apply.AdoptionReport,
+) error {
+	// Re-fetch to get latest resourceVersion
+	latest := &platformv1alpha1.ResourceGraph{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(rg), latest); err != nil {
+		return fmt.Errorf("failed to get latest ResourceGraph: %w", err)
+	}
+
+	now := metav1.Now()
+
+	// Initialize node states if needed
+	if latest.Status.NodeStates == nil {
+		latest.Status.NodeStates = make(map[string]platformv1alpha1.NodeExecutionState)
+	}
+
+	// Update node states with adoption info
+	for _, result := range report.Results {
+		if result.NodeID == "" {
+			continue
+		}
+
+		state := latest.Status.NodeStates[result.NodeID]
+		if result.Adopted {
+			state.Adopted = true
+			state.AdoptedAt = &now
+			state.PreviousManagers = result.ConflictingManagers
+			if result.Created {
+				state.Message = "Created (resource was missing)"
+			} else {
+				state.Message = "Adopted from existing resource"
+			}
+		}
+		if result.Error != nil {
+			state.LastError = result.Error.Error()
+		}
+		state.LastTransitionTime = &now
+		latest.Status.NodeStates[result.NodeID] = state
+	}
+
+	return r.Status().Update(ctx, latest)
 }
 
 // recordEvent records an event if the recorder is available
@@ -216,6 +363,9 @@ func (r *ResourceGraphReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// Initialize components if not already set
 	if r.Applier == nil {
 		r.Applier = apply.NewApplier(r.Client)
+	}
+	if r.Adopter == nil {
+		r.Adopter = apply.NewAdopter(r.Client)
 	}
 	if r.Checker == nil {
 		r.Checker = readiness.NewChecker(r.Client)

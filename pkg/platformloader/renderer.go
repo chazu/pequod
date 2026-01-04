@@ -26,10 +26,76 @@ func NewRenderer(loader *Loader) *Renderer {
 	}
 }
 
+// CueRefInput contains the CUE reference information for fetching modules
+type CueRefInput struct {
+	Type          string  // oci, git, configmap, inline, embedded
+	Ref           string  // The reference string
+	Path          string  // Optional path within the module
+	PullSecretRef *string // Optional pull secret reference
+}
+
+// RenderTransformWithCueRef renders a Transform using a CueRef specification
+// This is the preferred method for rendering Transforms as it supports all fetcher types
+func (r *Renderer) RenderTransformWithCueRef(ctx context.Context, name, namespace string, rawInput runtime.RawExtension, cueRef CueRefInput) (*graph.Graph, *FetchResult, error) {
+	var cueValue cue.Value
+	var fetchResult *FetchResult
+	var err error
+
+	switch cueRef.Type {
+	case "embedded":
+		// Use the legacy embedded loading for backwards compatibility
+		cueValue, err = r.loader.LoadEmbedded(cueRef.Ref)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to load embedded CUE module: %w", err)
+		}
+		fetchResult = &FetchResult{
+			Digest: fmt.Sprintf("embedded:%s", cueRef.Ref),
+			Source: fmt.Sprintf("embedded://%s", cueRef.Ref),
+		}
+
+	case "inline":
+		// Compile inline CUE directly
+		cueValue = r.loader.ctx.CompileString(cueRef.Ref)
+		if cueValue.Err() != nil {
+			return nil, nil, fmt.Errorf("failed to compile inline CUE: %w", cueValue.Err())
+		}
+		fetchResult = &FetchResult{
+			Content: []byte(cueRef.Ref),
+			Digest:  "inline",
+			Source:  "inline",
+		}
+
+	case "oci", "git", "configmap":
+		// Use the fetcher system
+		fetchResult, err = r.loader.FetchModule(ctx, cueRef.Type, cueRef.Ref, namespace, cueRef.PullSecretRef)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to fetch CUE module: %w", err)
+		}
+
+		// Compile the fetched content
+		cueValue, err = r.loader.LoadFromContent(fetchResult.Content)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to compile fetched CUE module: %w", err)
+		}
+
+	default:
+		return nil, nil, fmt.Errorf("unsupported CueRef type: %s", cueRef.Type)
+	}
+
+	// Render the graph
+	g, err := r.renderWithCueValue(ctx, name, namespace, rawInput, cueValue, cueRef.Ref)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return g, fetchResult, nil
+}
+
 // RenderTransform renders a Transform's input through a CUE platform module
 // This is the generic rendering method that works with any platform type.
 // The input is expected to contain the platform-specific "spec" fields.
 // Metadata (name, namespace) is provided separately and injected into the CUE input.
+// Deprecated: Use RenderTransformWithCueRef for full fetcher support
 func (r *Renderer) RenderTransform(ctx context.Context, name, namespace string, rawInput runtime.RawExtension, platformRef string) (*graph.Graph, error) {
 	// Load the CUE module based on platformRef
 	// For now, we only support embedded modules
@@ -37,6 +103,12 @@ func (r *Renderer) RenderTransform(ctx context.Context, name, namespace string, 
 	if err != nil {
 		return nil, fmt.Errorf("failed to load CUE module: %w", err)
 	}
+
+	return r.renderWithCueValue(ctx, name, namespace, rawInput, cueValue, platformRef)
+}
+
+// renderWithCueValue renders a Transform using a pre-loaded CUE value
+func (r *Renderer) renderWithCueValue(ctx context.Context, name, namespace string, rawInput runtime.RawExtension, cueValue cue.Value, platformRef string) (*graph.Graph, error) {
 
 	// Parse the raw input using json.Decoder with UseNumber() to preserve integer types
 	// Standard json.Unmarshal converts all numbers to float64, which causes CUE type errors
