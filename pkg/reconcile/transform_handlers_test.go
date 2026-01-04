@@ -76,7 +76,7 @@ func TestTransformHandlers_Reconcile_NotFound(t *testing.T) {
 	if err != nil {
 		t.Errorf("expected no error for not found, got %v", err)
 	}
-	if result.Requeue {
+	if result.RequeueAfter > 0 {
 		t.Error("expected no requeue for not found")
 	}
 }
@@ -112,7 +112,7 @@ func TestTransformHandlers_Reconcile_AddsFinalizer(t *testing.T) {
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
-	if !result.Requeue {
+	if result.RequeueAfter == 0 {
 		t.Error("expected requeue after adding finalizer")
 	}
 
@@ -161,7 +161,7 @@ func TestTransformHandlers_Reconcile_Paused(t *testing.T) {
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
-	if result.Requeue {
+	if result.RequeueAfter > 0 {
 		t.Error("expected no requeue for paused transform")
 	}
 
