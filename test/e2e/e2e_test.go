@@ -290,7 +290,7 @@ var _ = Describe("Manager", Ordered, func() {
 		It("should create and reconcile a Transform", func() {
 			By("creating a Transform resource")
 			transformYAML := fmt.Sprintf(`
-apiVersion: platform.pequod.io/v1alpha1
+apiVersion: platform.platform.example.com/v1alpha1
 kind: Transform
 metadata:
   name: %s
@@ -366,7 +366,7 @@ spec:
 		It("should update Transform when spec changes", func() {
 			By("creating initial Transform")
 			transformYAML := fmt.Sprintf(`
-apiVersion: platform.pequod.io/v1alpha1
+apiVersion: platform.platform.example.com/v1alpha1
 kind: Transform
 metadata:
   name: %s
@@ -397,7 +397,7 @@ spec:
 
 			By("updating Transform replicas")
 			updatedYAML := fmt.Sprintf(`
-apiVersion: platform.pequod.io/v1alpha1
+apiVersion: platform.platform.example.com/v1alpha1
 kind: Transform
 metadata:
   name: %s
@@ -439,7 +439,7 @@ spec:
 		It("should handle Transform deletion", func() {
 			By("creating a Transform")
 			transformYAML := fmt.Sprintf(`
-apiVersion: platform.pequod.io/v1alpha1
+apiVersion: platform.platform.example.com/v1alpha1
 kind: Transform
 metadata:
   name: %s
