@@ -1,0 +1,20 @@
+# Example WebService instance
+# This is what developers create after a Transform generates the WebService CRD.
+# The WebService CRD is dynamically generated from the Transform named "webservice".
+#
+# Flow:
+# 1. Platform engineer creates Transform (platform_v1alpha1_transform.yaml)
+# 2. Transform controller generates WebService CRD
+# 3. Developer creates this WebService instance
+# 4. Platform Instance controller renders CUE and creates ResourceGraph
+# 5. ResourceGraph controller applies the actual Kubernetes resources
+apiVersion: apps.example.com/v1alpha1
+kind: WebService
+metadata:
+  name: my-app
+  namespace: default
+spec:
+  # These fields are defined by the CUE platform module's #Input schema
+  image: nginx:latest
+  port: 80
+  replicas: 2

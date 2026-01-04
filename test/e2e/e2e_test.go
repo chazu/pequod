@@ -270,25 +270,30 @@ var _ = Describe("Manager", Ordered, func() {
 		// +kubebuilder:scaffold:e2e-webhooks-checks
 	})
 
-	Context("Transform", func() {
+	Context("Transform and Platform Instance", func() {
 		const testNamespace = "default"
-		const transformName = "test-transform"
+		const transformName = "webservice"
+		const instanceName = "test-app"
 
 		AfterEach(func() {
+			By("cleaning up WebService instance")
+			cmd := exec.Command("kubectl", "delete", "webservice", instanceName, "-n", testNamespace, "--ignore-not-found=true")
+			_, _ = utils.Run(cmd)
+
 			By("cleaning up Transform")
-			cmd := exec.Command("kubectl", "delete", "transform", transformName, "-n", testNamespace, "--ignore-not-found=true")
+			cmd = exec.Command("kubectl", "delete", "transform", transformName, "-n", testNamespace, "--ignore-not-found=true")
 			_, _ = utils.Run(cmd)
 
 			By("waiting for resources to be cleaned up")
 			Eventually(func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "deployment", transformName, "-n", testNamespace)
+				cmd := exec.Command("kubectl", "get", "deployment", instanceName, "-n", testNamespace)
 				_, err := utils.Run(cmd)
 				g.Expect(err).To(HaveOccurred(), "Deployment should be deleted")
 			}, 2*time.Minute).Should(Succeed())
 		})
 
-		It("should create and reconcile a Transform", func() {
-			By("creating a Transform resource")
+		It("should create a CRD from Transform and reconcile platform instances", func() {
+			By("creating a Transform resource (platform definition)")
 			transformYAML := fmt.Sprintf(`
 apiVersion: platform.platform.example.com/v1alpha1
 kind: Transform
@@ -297,12 +302,12 @@ metadata:
   namespace: %s
 spec:
   cueRef:
-    type: Embedded
+    type: embedded
     ref: webservice
-  input:
-    image: nginx:latest
-    port: 80
-    replicas: 2
+  group: apps.example.com
+  version: v1alpha1
+  shortNames:
+    - ws
 `, transformName, testNamespace)
 
 			cmd := exec.Command("kubectl", "apply", "-f", "-")
@@ -310,28 +315,53 @@ spec:
 			_, err := utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "Failed to create Transform")
 
-			By("verifying ResourceGraph was created")
+			By("verifying CRD was generated")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "crd", "webservices.apps.example.com")
+				_, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred(), "WebService CRD should be created")
+			}, 2*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("verifying Transform status shows generated CRD")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "transform", transformName, "-n", testNamespace,
+					"-o", "jsonpath={.status.generatedCRD.name}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("webservices.apps.example.com"), "Transform should reference generated CRD")
+			}, 2*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("creating a WebService instance")
+			instanceYAML := fmt.Sprintf(`
+apiVersion: apps.example.com/v1alpha1
+kind: WebService
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  image: nginx:latest
+  port: 80
+  replicas: 2
+`, instanceName, testNamespace)
+
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(instanceYAML)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create WebService instance")
+
+			By("verifying ResourceGraph was created for the instance")
 			Eventually(func(g Gomega) {
 				cmd := exec.Command("kubectl", "get", "resourcegraph", "-n", testNamespace,
-					"-l", fmt.Sprintf("pequod.io/transform=%s", transformName),
+					"-l", fmt.Sprintf("pequod.io/instance=%s", instanceName),
 					"-o", "jsonpath={.items[0].metadata.name}")
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(output).NotTo(BeEmpty(), "ResourceGraph should be created")
 			}, 2*time.Minute, 5*time.Second).Should(Succeed())
 
-			By("verifying Transform status has ResourceGraphRef")
-			Eventually(func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "transform", transformName, "-n", testNamespace,
-					"-o", "jsonpath={.status.resourceGraphRef.name}")
-				output, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(output).NotTo(BeEmpty(), "Transform should have resourceGraphRef")
-			}, 2*time.Minute, 5*time.Second).Should(Succeed())
-
 			By("verifying Deployment was created")
 			Eventually(func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "deployment", transformName, "-n", testNamespace,
+				cmd := exec.Command("kubectl", "get", "deployment", instanceName, "-n", testNamespace,
 					"-o", "jsonpath={.spec.replicas}")
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
@@ -340,7 +370,7 @@ spec:
 
 			By("verifying Service was created")
 			Eventually(func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "service", transformName, "-n", testNamespace,
+				cmd := exec.Command("kubectl", "get", "service", instanceName, "-n", testNamespace,
 					"-o", "jsonpath={.spec.ports[0].port}")
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
@@ -349,7 +379,7 @@ spec:
 
 			By("verifying Deployment becomes available")
 			Eventually(func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "deployment", transformName, "-n", testNamespace,
+				cmd := exec.Command("kubectl", "get", "deployment", instanceName, "-n", testNamespace,
 					"-o", "jsonpath={.status.availableReplicas}")
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
@@ -363,8 +393,8 @@ spec:
 				"Metrics should include reconciliation counter")
 		})
 
-		It("should update Transform when spec changes", func() {
-			By("creating initial Transform")
+		It("should update resources when platform instance spec changes", func() {
+			By("creating a Transform resource")
 			transformYAML := fmt.Sprintf(`
 apiVersion: platform.platform.example.com/v1alpha1
 kind: Transform
@@ -373,12 +403,9 @@ metadata:
   namespace: %s
 spec:
   cueRef:
-    type: Embedded
+    type: embedded
     ref: webservice
-  input:
-    image: nginx:latest
-    port: 80
-    replicas: 1
+  group: apps.example.com
 `, transformName, testNamespace)
 
 			cmd := exec.Command("kubectl", "apply", "-f", "-")
@@ -386,31 +413,52 @@ spec:
 			_, err := utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
 
+			By("waiting for CRD to be generated")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "crd", "webservices.apps.example.com")
+				_, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+			}, 2*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("creating initial WebService instance")
+			instanceYAML := fmt.Sprintf(`
+apiVersion: apps.example.com/v1alpha1
+kind: WebService
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  image: nginx:latest
+  port: 80
+  replicas: 1
+`, instanceName, testNamespace)
+
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(instanceYAML)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
 			By("waiting for initial reconciliation")
 			Eventually(func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "deployment", transformName, "-n", testNamespace,
+				cmd := exec.Command("kubectl", "get", "deployment", instanceName, "-n", testNamespace,
 					"-o", "jsonpath={.spec.replicas}")
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(output).To(Equal("1"))
 			}, 3*time.Minute, 5*time.Second).Should(Succeed())
 
-			By("updating Transform replicas")
+			By("updating WebService instance replicas")
 			updatedYAML := fmt.Sprintf(`
-apiVersion: platform.platform.example.com/v1alpha1
-kind: Transform
+apiVersion: apps.example.com/v1alpha1
+kind: WebService
 metadata:
   name: %s
   namespace: %s
 spec:
-  cueRef:
-    type: Embedded
-    ref: webservice
-  input:
-    image: nginx:latest
-    port: 80
-    replicas: 3
-`, transformName, testNamespace)
+  image: nginx:latest
+  port: 80
+  replicas: 3
+`, instanceName, testNamespace)
 
 			cmd = exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(updatedYAML)
@@ -419,7 +467,7 @@ spec:
 
 			By("verifying Deployment was updated")
 			Eventually(func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "deployment", transformName, "-n", testNamespace,
+				cmd := exec.Command("kubectl", "get", "deployment", instanceName, "-n", testNamespace,
 					"-o", "jsonpath={.spec.replicas}")
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
@@ -428,7 +476,7 @@ spec:
 
 			By("verifying all replicas become available")
 			Eventually(func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "deployment", transformName, "-n", testNamespace,
+				cmd := exec.Command("kubectl", "get", "deployment", instanceName, "-n", testNamespace,
 					"-o", "jsonpath={.status.availableReplicas}")
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
@@ -436,8 +484,8 @@ spec:
 			}, 3*time.Minute, 5*time.Second).Should(Succeed())
 		})
 
-		It("should handle Transform deletion", func() {
-			By("creating a Transform")
+		It("should handle platform instance deletion", func() {
+			By("creating a Transform resource")
 			transformYAML := fmt.Sprintf(`
 apiVersion: platform.platform.example.com/v1alpha1
 kind: Transform
@@ -446,12 +494,9 @@ metadata:
   namespace: %s
 spec:
   cueRef:
-    type: Embedded
+    type: embedded
     ref: webservice
-  input:
-    image: nginx:latest
-    port: 80
-    replicas: 1
+  group: apps.example.com
 `, transformName, testNamespace)
 
 			cmd := exec.Command("kubectl", "apply", "-f", "-")
@@ -459,22 +504,47 @@ spec:
 			_, err := utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
 
+			By("waiting for CRD to be generated")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "crd", "webservices.apps.example.com")
+				_, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+			}, 2*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("creating a WebService instance")
+			instanceYAML := fmt.Sprintf(`
+apiVersion: apps.example.com/v1alpha1
+kind: WebService
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  image: nginx:latest
+  port: 80
+  replicas: 1
+`, instanceName, testNamespace)
+
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(instanceYAML)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
 			By("waiting for resources to be created")
 			Eventually(func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "deployment", transformName, "-n", testNamespace)
+				cmd := exec.Command("kubectl", "get", "deployment", instanceName, "-n", testNamespace)
 				_, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
 			}, 2*time.Minute).Should(Succeed())
 
-			By("deleting the Transform")
-			cmd = exec.Command("kubectl", "delete", "transform", transformName, "-n", testNamespace)
+			By("deleting the WebService instance")
+			cmd = exec.Command("kubectl", "delete", "webservice", instanceName, "-n", testNamespace)
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
 
 			By("verifying ResourceGraph is deleted")
 			Eventually(func(g Gomega) {
 				cmd := exec.Command("kubectl", "get", "resourcegraph", "-n", testNamespace,
-					"-l", fmt.Sprintf("pequod.io/transform=%s", transformName))
+					"-l", fmt.Sprintf("pequod.io/instance=%s", instanceName))
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(output).To(ContainSubstring("No resources found"), "ResourceGraph should be deleted")
@@ -482,14 +552,14 @@ spec:
 
 			By("verifying Deployment is deleted")
 			Eventually(func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "deployment", transformName, "-n", testNamespace)
+				cmd := exec.Command("kubectl", "get", "deployment", instanceName, "-n", testNamespace)
 				_, err := utils.Run(cmd)
 				g.Expect(err).To(HaveOccurred(), "Deployment should be deleted")
 			}, 2*time.Minute, 5*time.Second).Should(Succeed())
 
 			By("verifying Service is deleted")
 			Eventually(func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "service", transformName, "-n", testNamespace)
+				cmd := exec.Command("kubectl", "get", "service", instanceName, "-n", testNamespace)
 				_, err := utils.Run(cmd)
 				g.Expect(err).To(HaveOccurred(), "Service should be deleted")
 			}, 2*time.Minute, 5*time.Second).Should(Succeed())

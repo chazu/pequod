@@ -26,6 +26,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -64,6 +65,9 @@ var _ = BeforeSuite(func() {
 
 	var err error
 	err = platformv1alpha1.AddToScheme(scheme.Scheme)
+	Expect(err).NotTo(HaveOccurred())
+
+	err = apiextensionsv1.AddToScheme(scheme.Scheme)
 	Expect(err).NotTo(HaveOccurred())
 
 	// +kubebuilder:scaffold:scheme
@@ -107,13 +111,11 @@ var _ = BeforeSuite(func() {
 
 	// Setup Transform controller
 	loader := platformloader.NewLoader()
-	renderer := platformloader.NewRenderer(loader)
 
 	err = (&TransformReconciler{
 		Client:         k8sManager.GetClient(),
 		Scheme:         k8sManager.GetScheme(),
 		PlatformLoader: loader,
-		Renderer:       renderer,
 		Recorder:       k8sManager.GetEventRecorderFor("transform-controller"),
 	}).SetupWithManager(k8sManager)
 	Expect(err).ToNot(HaveOccurred())

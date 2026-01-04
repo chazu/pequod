@@ -22,12 +22,12 @@ func TestNewRenderer(t *testing.T) {
 	}
 }
 
-func TestRenderTransform(t *testing.T) {
+func TestRenderTransformWithCueRef(t *testing.T) {
 	loader := NewLoader()
 	renderer := NewRenderer(loader)
 	ctx := context.Background()
 
-	// Build input as raw JSON (matching Transform input format)
+	// Build input as raw JSON (matching platform instance spec)
 	input := map[string]interface{}{
 		"image":    "nginx:latest",
 		"port":     8080,
@@ -38,13 +38,22 @@ func TestRenderTransform(t *testing.T) {
 		t.Fatalf("failed to marshal input: %v", err)
 	}
 
-	g, err := renderer.RenderTransform(ctx, "test-app", "default", runtime.RawExtension{Raw: inputJSON}, "webservice")
+	cueRef := CueRefInput{
+		Type: "embedded",
+		Ref:  "webservice",
+	}
+
+	g, fetchResult, err := renderer.RenderTransformWithCueRef(ctx, "test-app", "default", runtime.RawExtension{Raw: inputJSON}, cueRef)
 	if err != nil {
 		t.Fatalf("failed to render: %v", err)
 	}
 
 	if g == nil {
 		t.Fatal("expected non-nil graph")
+	}
+
+	if fetchResult == nil {
+		t.Fatal("expected non-nil fetch result")
 	}
 
 	// Verify metadata
@@ -135,7 +144,12 @@ func TestRenderTransformWithDefaultReplicas(t *testing.T) {
 		t.Fatalf("failed to marshal input: %v", err)
 	}
 
-	g, err := renderer.RenderTransform(ctx, "test-app", "default", runtime.RawExtension{Raw: inputJSON}, "webservice")
+	cueRef := CueRefInput{
+		Type: "embedded",
+		Ref:  "webservice",
+	}
+
+	g, _, err := renderer.RenderTransformWithCueRef(ctx, "test-app", "default", runtime.RawExtension{Raw: inputJSON}, cueRef)
 	if err != nil {
 		t.Fatalf("failed to render: %v", err)
 	}

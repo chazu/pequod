@@ -153,15 +153,28 @@ func setupControllers(mgr ctrl.Manager) error {
 		return err
 	}
 
-	// Setup Transform controller
-	loader := platformloader.NewLoader()
+	// Setup platform loader with K8s client support for ConfigMap fetching
+	loader := platformloader.NewLoaderWithConfig(platformloader.LoaderConfig{
+		K8sClient: mgr.GetClient(),
+	})
 	renderer := platformloader.NewRenderer(loader)
+
+	// Setup Transform controller (generates CRDs from Transform definitions)
 	if err := (&controller.TransformReconciler{
 		Client:         mgr.GetClient(),
 		Scheme:         mgr.GetScheme(),
 		PlatformLoader: loader,
-		Renderer:       renderer,
 		Recorder:       mgr.GetEventRecorderFor("transform-controller"),
+	}).SetupWithManager(mgr); err != nil {
+		return err
+	}
+
+	// Setup Platform Instance controller (watches generated CRDs and creates ResourceGraphs)
+	if err := (&controller.PlatformInstanceReconciler{
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: mgr.GetEventRecorderFor("platforminstance-controller"),
+		Renderer: renderer,
 	}).SetupWithManager(mgr); err != nil {
 		return err
 	}

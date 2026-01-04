@@ -45,7 +45,7 @@ func (r *Renderer) RenderTransformWithCueRef(
 
 	switch cueRef.Type {
 	case "embedded":
-		// Use the legacy embedded loading for backwards compatibility
+		// Load embedded CUE module from operator binary
 		cueValue, err = r.loader.LoadEmbedded(cueRef.Ref)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to load embedded CUE module: %w", err)
@@ -91,22 +91,6 @@ func (r *Renderer) RenderTransformWithCueRef(
 	}
 
 	return g, fetchResult, nil
-}
-
-// RenderTransform renders a Transform's input through a CUE platform module
-// This is the generic rendering method that works with any platform type.
-// The input is expected to contain the platform-specific "spec" fields.
-// Metadata (name, namespace) is provided separately and injected into the CUE input.
-// Deprecated: Use RenderTransformWithCueRef for full fetcher support
-func (r *Renderer) RenderTransform(ctx context.Context, name, namespace string, rawInput runtime.RawExtension, platformRef string) (*graph.Graph, error) {
-	// Load the CUE module based on platformRef
-	// For now, we only support embedded modules
-	cueValue, err := r.loader.LoadEmbedded(platformRef)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load CUE module: %w", err)
-	}
-
-	return r.renderWithCueValue(ctx, name, namespace, rawInput, cueValue, platformRef)
 }
 
 // renderWithCueValue renders a Transform using a pre-loaded CUE value

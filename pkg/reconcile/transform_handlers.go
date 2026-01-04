@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 
+	"cuelang.org/go/cue"
 	"github.com/authzed/controller-idioms/pause"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -16,8 +18,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	platformv1alpha1 "github.com/chazu/pequod/api/v1alpha1"
-	"github.com/chazu/pequod/pkg/graph"
+	"github.com/chazu/pequod/pkg/crd"
 	"github.com/chazu/pequod/pkg/platformloader"
+	"github.com/chazu/pequod/pkg/schema"
 )
 
 const (
@@ -30,10 +33,12 @@ const (
 
 // TransformHandlers contains all handlers for Transform reconciliation
 type TransformHandlers struct {
-	client   client.Client
-	scheme   *runtime.Scheme
-	recorder record.EventRecorder
-	renderer *platformloader.Renderer
+	client    client.Client
+	scheme    *runtime.Scheme
+	recorder  record.EventRecorder
+	loader    *platformloader.Loader
+	extractor *schema.Extractor
+	generator *crd.Generator
 }
 
 // NewTransformHandlers creates a new handler collection for Transform
@@ -41,17 +46,20 @@ func NewTransformHandlers(
 	k8sClient client.Client,
 	scheme *runtime.Scheme,
 	recorder record.EventRecorder,
-	renderer *platformloader.Renderer,
+	loader *platformloader.Loader,
 ) *TransformHandlers {
 	return &TransformHandlers{
-		client:   k8sClient,
-		scheme:   scheme,
-		recorder: recorder,
-		renderer: renderer,
+		client:    k8sClient,
+		scheme:    scheme,
+		recorder:  recorder,
+		loader:    loader,
+		extractor: schema.NewExtractor(),
+		generator: crd.NewGenerator(),
 	}
 }
 
-// Reconcile executes the full reconciliation pipeline for a Transform
+// Reconcile executes the full reconciliation pipeline for a Transform.
+// In the new architecture, Transform generates a CRD from the CUE schema.
 func (h *TransformHandlers) Reconcile(ctx context.Context, nn types.NamespacedName) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
@@ -122,244 +130,204 @@ func (h *TransformHandlers) Reconcile(ctx context.Context, nn types.NamespacedNa
 		}
 	}
 
-	// Step 3: Render the graph
-	g, fetchResult, err := h.renderGraph(ctx, tf)
+	// Update phase to Fetching
+	tf.Status.Phase = platformv1alpha1.TransformPhaseFetching
+	if err := h.client.Status().Update(ctx, tf); err != nil {
+		logger.Error(err, "failed to update phase to Fetching")
+	}
+
+	// Step 4: Fetch CUE module and extract schema
+	inputSchema, fetchResult, err := h.fetchAndExtractSchema(ctx, tf)
 	if err != nil {
+		tf.Status.Phase = platformv1alpha1.TransformPhaseFailed
 		tf.SetCondition(
-			"Rendered",
+			"CueFetched",
 			metav1.ConditionFalse,
-			"RenderFailed",
-			fmt.Sprintf("Failed to render graph: %v", err),
+			"FetchFailed",
+			fmt.Sprintf("Failed to fetch/extract CUE schema: %v", err),
 		)
-		// Update the status with the error
 		if statusErr := h.client.Status().Update(ctx, tf); statusErr != nil {
-			logger.Error(statusErr, "failed to update status after render failure")
+			logger.Error(statusErr, "failed to update status after fetch failure")
 		}
 		return ctrl.Result{}, err
 	}
 
-	// Step 4: Create/Update ResourceGraph
-	rg, err := h.createOrUpdateResourceGraph(ctx, tf, g)
+	// Update CueFetched condition
+	tf.SetCondition(
+		"CueFetched",
+		metav1.ConditionTrue,
+		"ModuleFetched",
+		fmt.Sprintf("CUE module fetched from %s", fetchResult.Source),
+	)
+
+	// Update phase to Generating
+	tf.Status.Phase = platformv1alpha1.TransformPhaseGenerating
+	if err := h.client.Status().Update(ctx, tf); err != nil {
+		logger.Error(err, "failed to update phase to Generating")
+	}
+
+	// Step 5: Generate and apply CRD
+	generatedCRD, err := h.generateAndApplyCRD(ctx, tf, inputSchema)
 	if err != nil {
+		tf.Status.Phase = platformv1alpha1.TransformPhaseFailed
+		tf.SetCondition(
+			"CRDGenerated",
+			metav1.ConditionFalse,
+			"GenerationFailed",
+			fmt.Sprintf("Failed to generate/apply CRD: %v", err),
+		)
+		if statusErr := h.client.Status().Update(ctx, tf); statusErr != nil {
+			logger.Error(statusErr, "failed to update status after CRD generation failure")
+		}
 		return ctrl.Result{}, err
 	}
 
-	// Step 5: Update Transform status with fetch result
-	return h.updateStatus(ctx, tf, rg, fetchResult)
+	// Step 6: Update final status
+	return h.updateStatus(ctx, tf, generatedCRD, fetchResult)
 }
 
-// renderGraph renders the CUE graph from the Transform spec
-func (h *TransformHandlers) renderGraph(ctx context.Context, tf *platformv1alpha1.Transform) (*graph.Graph, *platformloader.FetchResult, error) {
+// fetchAndExtractSchema fetches the CUE module and extracts the input schema
+func (h *TransformHandlers) fetchAndExtractSchema(
+	ctx context.Context, tf *platformv1alpha1.Transform,
+) (*apiextensionsv1.JSONSchemaProps, *platformloader.FetchResult, error) {
 	logger := log.FromContext(ctx)
 
-	// Build CueRefInput from Transform's CueRef
+	var fetchResult *platformloader.FetchResult
+	var cueValue cue.Value
+	var err error
+
+	// Build the fetch parameters
 	var pullSecretRef *string
 	if tf.Spec.CueRef.PullSecretRef != nil {
 		pullSecretRef = &tf.Spec.CueRef.PullSecretRef.Name
 	}
 
-	cueRef := platformloader.CueRefInput{
-		Type:          string(tf.Spec.CueRef.Type),
-		Ref:           tf.Spec.CueRef.Ref,
-		Path:          tf.Spec.CueRef.Path,
-		PullSecretRef: pullSecretRef,
-	}
-
-	// Render graph from Transform input using the new method that supports all CueRef types
-	g, fetchResult, err := h.renderer.RenderTransformWithCueRef(
-		ctx,
-		tf.Name,
-		tf.Namespace,
-		tf.Spec.Input,
-		cueRef,
-	)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to render graph: %w", err)
-	}
-
-	// Compute hash for the graph
-	g.SetHash()
-
-	// Record events for policy violations
-	if len(g.Violations) > 0 {
-		errorCount := 0
-		warningCount := 0
-		for _, v := range g.Violations {
-			switch v.Severity {
-			case graph.ViolationSeverityError:
-				errorCount++
-			case graph.ViolationSeverityWarning:
-				warningCount++
-			}
+	switch tf.Spec.CueRef.Type {
+	case platformv1alpha1.CueRefTypeEmbedded:
+		// Load embedded module
+		cueValue, err = h.loader.LoadEmbedded(tf.Spec.CueRef.Ref)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to load embedded CUE module: %w", err)
+		}
+		fetchResult = &platformloader.FetchResult{
+			Digest: fmt.Sprintf("embedded:%s", tf.Spec.CueRef.Ref),
+			Source: fmt.Sprintf("embedded://%s", tf.Spec.CueRef.Ref),
 		}
 
-		if errorCount > 0 {
-			if h.recorder != nil {
-				h.recorder.Eventf(tf, "Warning", "PolicyViolation",
-					"Graph has %d policy error(s) and %d warning(s)", errorCount, warningCount)
-			}
-			logger.Info("Policy violations detected",
-				"errors", errorCount,
-				"warnings", warningCount)
-		} else if warningCount > 0 {
-			if h.recorder != nil {
-				h.recorder.Eventf(tf, "Warning", "PolicyWarning",
-					"Graph has %d policy warning(s)", warningCount)
-			}
+	case platformv1alpha1.CueRefTypeInline:
+		// Compile inline CUE
+		cueValue = h.loader.Context().CompileString(tf.Spec.CueRef.Ref)
+		if cueValue.Err() != nil {
+			return nil, nil, fmt.Errorf("failed to compile inline CUE: %w", cueValue.Err())
 		}
+		fetchResult = &platformloader.FetchResult{
+			Content: []byte(tf.Spec.CueRef.Ref),
+			Digest:  platformloader.InlineType,
+			Source:  platformloader.InlineType,
+		}
+
+	case platformv1alpha1.CueRefTypeOCI, platformv1alpha1.CueRefTypeGit, platformv1alpha1.CueRefTypeConfigMap:
+		// Use fetcher system
+		fetchResult, err = h.loader.FetchModule(ctx, string(tf.Spec.CueRef.Type), tf.Spec.CueRef.Ref, tf.Namespace, pullSecretRef)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to fetch CUE module: %w", err)
+		}
+
+		cueValue, err = h.loader.LoadFromContent(fetchResult.Content)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to compile fetched CUE module: %w", err)
+		}
+
+	default:
+		return nil, nil, fmt.Errorf("unsupported CueRef type: %s", tf.Spec.CueRef.Type)
 	}
 
-	logger.Info("graph rendered successfully",
-		"hash", g.Metadata.RenderHash,
-		"nodes", len(g.Nodes),
-		"violations", len(g.Violations),
+	logger.Info("CUE module fetched successfully",
 		"source", fetchResult.Source,
 		"digest", fetchResult.Digest)
 
-	return g, fetchResult, nil
+	// Extract the input schema from CUE
+	inputSchema, err := h.extractor.ExtractInputSchema(cueValue)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to extract input schema: %w", err)
+	}
+
+	logger.Info("Input schema extracted successfully",
+		"properties", len(inputSchema.Properties),
+		"required", len(inputSchema.Required))
+
+	return inputSchema, fetchResult, nil
 }
 
-// Size warning thresholds
-const (
-	// NodeCountWarningThreshold triggers a warning when approaching the limit
-	NodeCountWarningThreshold = 80
-	// NodeCountMaxLimit is the maximum allowed nodes (matches CRD validation)
-	NodeCountMaxLimit = 100
-)
-
-// createOrUpdateResourceGraph creates or updates a ResourceGraph CR from the rendered graph
-func (h *TransformHandlers) createOrUpdateResourceGraph(
-	ctx context.Context, tf *platformv1alpha1.Transform, g *graph.Graph,
-) (*platformv1alpha1.ResourceGraph, error) {
+// generateAndApplyCRD generates a CRD from the schema and applies it to the cluster
+func (h *TransformHandlers) generateAndApplyCRD(
+	ctx context.Context, tf *platformv1alpha1.Transform, inputSchema *apiextensionsv1.JSONSchemaProps,
+) (*platformv1alpha1.GeneratedCRDReference, error) {
 	logger := log.FromContext(ctx)
 
-	// Check node count and emit warnings
-	nodeCount := len(g.Nodes)
-	if nodeCount >= NodeCountMaxLimit {
-		return nil, fmt.Errorf("graph has %d nodes, exceeding maximum limit of %d", nodeCount, NodeCountMaxLimit)
-	}
-	if nodeCount >= NodeCountWarningThreshold {
-		logger.Info("WARNING: Graph approaching node limit",
-			"nodeCount", nodeCount,
-			"warningThreshold", NodeCountWarningThreshold,
-			"maxLimit", NodeCountMaxLimit,
-			"transform", tf.Name)
-		if h.recorder != nil {
-			h.recorder.Eventf(tf, "Warning", "NodeCountWarning",
-				"ResourceGraph has %d nodes, approaching limit of %d", nodeCount, NodeCountMaxLimit)
-		}
+	// Build generator config from Transform spec
+	config := crd.GeneratorConfig{
+		Group:              tf.Spec.Group,
+		Version:            tf.Spec.Version,
+		ShortNames:         tf.Spec.ShortNames,
+		Categories:         tf.Spec.Categories,
+		TransformName:      tf.Name,
+		TransformNamespace: tf.Namespace,
 	}
 
-	// Build ResourceGraph CR from the rendered graph
-	rg, err := buildResourceGraphFromTransform(tf, g, h.scheme)
-	if err != nil {
-		return nil, fmt.Errorf("failed to build ResourceGraph: %w", err)
+	// Derive platform name from Transform name
+	platformName := tf.Name
+
+	// Generate the CRD
+	generatedCRD := h.generator.GenerateCRD(platformName, inputSchema, config)
+
+	logger.Info("Generated CRD",
+		"name", generatedCRD.Name,
+		"kind", generatedCRD.Spec.Names.Kind,
+		"group", generatedCRD.Spec.Group)
+
+	// Apply the CRD to the cluster
+	if err := h.generator.ApplyCRD(ctx, h.client, generatedCRD); err != nil {
+		return nil, fmt.Errorf("failed to apply CRD: %w", err)
 	}
 
-	// Try to get existing ResourceGraph
-	existing := &platformv1alpha1.ResourceGraph{}
-	err = h.client.Get(ctx, client.ObjectKey{Name: rg.Name, Namespace: rg.Namespace}, existing)
+	logger.Info("CRD applied successfully", "name", generatedCRD.Name)
 
-	if err != nil {
-		if errors.IsNotFound(err) {
-			// Create new ResourceGraph
-			if err := h.client.Create(ctx, rg); err != nil {
-				return nil, fmt.Errorf("failed to create ResourceGraph: %w", err)
-			}
-			logger.Info("Created ResourceGraph", "name", rg.Name, "nodeCount", nodeCount)
-
-			// Clean up old ResourceGraphs from this Transform
-			if err := h.cleanupOldResourceGraphs(ctx, tf, rg.Name); err != nil {
-				// Log but don't fail - cleanup is best effort
-				logger.Error(err, "Failed to cleanup old ResourceGraphs", "transform", tf.Name)
-			}
-
-			return rg, nil
-		}
-		return nil, fmt.Errorf("failed to get ResourceGraph: %w", err)
+	// Record event
+	if h.recorder != nil {
+		h.recorder.Eventf(tf, "Normal", "CRDGenerated",
+			"Generated and applied CRD %s (kind: %s)",
+			generatedCRD.Name, generatedCRD.Spec.Names.Kind)
 	}
 
-	// Update existing ResourceGraph spec
-	existing.Spec = rg.Spec
-	if err := h.client.Update(ctx, existing); err != nil {
-		return nil, fmt.Errorf("failed to update ResourceGraph: %w", err)
+	// Build the reference
+	ref := &platformv1alpha1.GeneratedCRDReference{
+		APIVersion: fmt.Sprintf("%s/%s", config.Group, config.Version),
+		Kind:       generatedCRD.Spec.Names.Kind,
+		Name:       generatedCRD.Name,
+		Plural:     generatedCRD.Spec.Names.Plural,
 	}
 
-	logger.Info("Updated ResourceGraph", "name", rg.Name, "nodeCount", nodeCount)
-	return existing, nil
+	// Apply defaults if not set
+	if ref.APIVersion == "/" {
+		ref.APIVersion = fmt.Sprintf("%s/%s", crd.DefaultGroup, crd.DefaultVersion)
+	}
+
+	return ref, nil
 }
 
-// cleanupOldResourceGraphs removes ResourceGraphs that belong to this Transform
-// but are not the current one (identified by different names due to hash changes)
-func (h *TransformHandlers) cleanupOldResourceGraphs(ctx context.Context, tf *platformv1alpha1.Transform, currentRGName string) error {
-	logger := log.FromContext(ctx)
-
-	// List all ResourceGraphs with the transform label
-	rgList := &platformv1alpha1.ResourceGraphList{}
-	if err := h.client.List(ctx, rgList,
-		client.InNamespace(tf.Namespace),
-		client.MatchingLabels{"pequod.io/transform": tf.Name},
-	); err != nil {
-		return fmt.Errorf("failed to list ResourceGraphs: %w", err)
-	}
-
-	var deletedCount int
-	for _, rg := range rgList.Items {
-		// Skip the current ResourceGraph
-		if rg.Name == currentRGName {
-			continue
-		}
-
-		// Verify ownership before deleting
-		isOwned := false
-		for _, ownerRef := range rg.OwnerReferences {
-			if ownerRef.UID == tf.UID {
-				isOwned = true
-				break
-			}
-		}
-
-		if !isOwned {
-			logger.V(1).Info("Skipping ResourceGraph not owned by this Transform",
-				"resourceGraph", rg.Name, "transform", tf.Name)
-			continue
-		}
-
-		// Delete the old ResourceGraph
-		logger.Info("Deleting old ResourceGraph", "name", rg.Name, "transform", tf.Name)
-		if err := h.client.Delete(ctx, &rg); err != nil {
-			if !errors.IsNotFound(err) {
-				logger.Error(err, "Failed to delete old ResourceGraph", "name", rg.Name)
-			}
-		} else {
-			deletedCount++
-		}
-	}
-
-	if deletedCount > 0 {
-		logger.Info("Cleaned up old ResourceGraphs", "count", deletedCount, "transform", tf.Name)
-		if h.recorder != nil {
-			h.recorder.Eventf(tf, "Normal", "CleanedUp",
-				"Deleted %d old ResourceGraph(s)", deletedCount)
-		}
-	}
-
-	return nil
-}
-
-// updateStatus updates the Transform status with ResourceGraph reference
+// updateStatus updates the Transform status with the generated CRD reference
 func (h *TransformHandlers) updateStatus(
 	ctx context.Context, tf *platformv1alpha1.Transform,
-	rg *platformv1alpha1.ResourceGraph, fetchResult *platformloader.FetchResult,
+	generatedCRD *platformv1alpha1.GeneratedCRDReference, fetchResult *platformloader.FetchResult,
 ) (ctrl.Result, error) {
-	// Update ResourceGraph reference
-	tf.Status.ResourceGraphRef = &platformv1alpha1.ObjectReference{
-		APIVersion: rg.APIVersion,
-		Kind:       rg.Kind,
-		Name:       rg.Name,
-		Namespace:  rg.Namespace,
-		UID:        string(rg.UID),
-	}
+	logger := log.FromContext(ctx)
+
+	// Update phase
+	tf.Status.Phase = platformv1alpha1.TransformPhaseReady
+
+	// Update GeneratedCRD reference
+	tf.Status.GeneratedCRD = generatedCRD
 
 	// Update ResolvedCueRef with fetch result
 	if fetchResult != nil {
@@ -370,20 +338,19 @@ func (h *TransformHandlers) updateStatus(
 		}
 	}
 
-	// Set Rendered condition
+	// Set conditions
 	tf.SetCondition(
-		"Rendered",
+		"CRDGenerated",
 		metav1.ConditionTrue,
-		"GraphRendered",
-		fmt.Sprintf("ResourceGraph %s created successfully", rg.Name),
+		"CRDApplied",
+		fmt.Sprintf("CRD %s generated and applied successfully", generatedCRD.Name),
 	)
 
-	// Set CueFetched condition
 	tf.SetCondition(
-		"CueFetched",
+		"SchemaExtracted",
 		metav1.ConditionTrue,
-		"ModuleFetched",
-		fmt.Sprintf("CUE module fetched from %s", fetchResult.Source),
+		"SchemaExtracted",
+		"Input schema extracted from CUE module",
 	)
 
 	// Update observed generation
@@ -394,111 +361,19 @@ func (h *TransformHandlers) updateStatus(
 		return ctrl.Result{}, fmt.Errorf("failed to update status: %w", err)
 	}
 
+	logger.Info("Transform reconciled successfully",
+		"phase", tf.Status.Phase,
+		"crd", generatedCRD.Name,
+		"kind", generatedCRD.Kind)
+
 	// Record event
 	if h.recorder != nil {
-		h.recorder.Eventf(tf, "Normal", "Rendered",
-			"ResourceGraph %s created with %d nodes from %s", rg.Name, len(rg.Spec.Nodes), fetchResult.Source)
+		h.recorder.Eventf(tf, "Normal", "Ready",
+			"Transform ready - CRD %s (kind: %s) is available for use",
+			generatedCRD.Name, generatedCRD.Kind)
 	}
 
 	return ctrl.Result{}, nil
-}
-
-// buildResourceGraphFromTransform converts a graph.Graph to a ResourceGraph CR
-func buildResourceGraphFromTransform(tf *platformv1alpha1.Transform, g *graph.Graph, scheme *runtime.Scheme) (*platformv1alpha1.ResourceGraph, error) {
-	// Generate a name for the ResourceGraph
-	// Use Transform name + hash to make it unique and deterministic
-	rgName := fmt.Sprintf("%s-%s", tf.Name, g.Metadata.RenderHash[:8])
-
-	// Convert graph nodes to ResourceGraph nodes
-	nodes := make([]platformv1alpha1.ResourceNode, 0, len(g.Nodes))
-	for _, node := range g.Nodes {
-		// Marshal the unstructured object to JSON
-		objJSON, err := node.Object.MarshalJSON()
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal node %s: %w", node.ID, err)
-		}
-
-		// Convert ApplyPolicy
-		applyPolicy := platformv1alpha1.ApplyPolicy{
-			Mode:           string(node.ApplyPolicy.Mode),
-			ConflictPolicy: string(node.ApplyPolicy.ConflictPolicy),
-			FieldManager:   node.ApplyPolicy.FieldManager,
-		}
-
-		// Convert ReadyWhen predicates
-		readyWhen := make([]platformv1alpha1.ReadinessPredicate, 0, len(node.ReadyWhen))
-		for _, rw := range node.ReadyWhen {
-			pred := platformv1alpha1.ReadinessPredicate{
-				Type:            string(rw.Type),
-				ConditionType:   rw.ConditionType,
-				ConditionStatus: rw.ConditionStatus,
-			}
-			readyWhen = append(readyWhen, pred)
-		}
-
-		rgNode := platformv1alpha1.ResourceNode{
-			ID:          node.ID,
-			Object:      runtime.RawExtension{Raw: objJSON},
-			ApplyPolicy: applyPolicy,
-			DependsOn:   node.DependsOn,
-			ReadyWhen:   readyWhen,
-		}
-
-		nodes = append(nodes, rgNode)
-	}
-
-	// Convert violations
-	violations := make([]platformv1alpha1.PolicyViolation, 0, len(g.Violations))
-	for _, v := range g.Violations {
-		violations = append(violations, platformv1alpha1.PolicyViolation{
-			Path:     v.Path,
-			Message:  v.Message,
-			Severity: string(v.Severity),
-		})
-	}
-
-	// Create ResourceGraph CR
-	rg := &platformv1alpha1.ResourceGraph{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      rgName,
-			Namespace: tf.Namespace,
-			OwnerReferences: []metav1.OwnerReference{
-				{
-					APIVersion:         tf.APIVersion,
-					Kind:               tf.Kind,
-					Name:               tf.Name,
-					UID:                tf.UID,
-					Controller:         ptr(true),
-					BlockOwnerDeletion: ptr(true),
-				},
-			},
-			Labels: map[string]string{
-				"pequod.io/transform":      tf.Name,
-				"pequod.io/transform-type": tf.Spec.CueRef.Ref,
-			},
-		},
-		Spec: platformv1alpha1.ResourceGraphSpec{
-			SourceRef: platformv1alpha1.ObjectReference{
-				APIVersion: tf.APIVersion,
-				Kind:       tf.Kind,
-				Name:       tf.Name,
-				Namespace:  tf.Namespace,
-				UID:        string(tf.UID),
-			},
-			Metadata: platformv1alpha1.GraphMetadata{
-				Name:        g.Metadata.Name,
-				Version:     g.Metadata.Version,
-				PlatformRef: g.Metadata.PlatformRef,
-			},
-			Nodes:      nodes,
-			Violations: violations,
-			Adopt:      tf.Spec.Adopt, // Copy adoption spec from Transform
-			RenderHash: g.Metadata.RenderHash,
-			RenderedAt: metav1.Now(),
-		},
-	}
-
-	return rg, nil
 }
 
 // handleDeletion handles Transform deletion by cleaning up and removing the finalizer
@@ -517,9 +392,23 @@ func (h *TransformHandlers) handleDeletion(ctx context.Context, tf *platformv1al
 		h.recorder.Event(tf, "Normal", "Deleting", "Transform is being deleted")
 	}
 
-	// ResourceGraphs are deleted automatically via owner reference cascade
-	// (BlockOwnerDeletion: true is set on the owner reference)
-	// No additional cleanup required
+	// Delete the generated CRD if it exists
+	if tf.Status.GeneratedCRD != nil {
+		crdName := tf.Status.GeneratedCRD.Name
+		logger.Info("Deleting generated CRD", "name", crdName)
+
+		if err := h.generator.DeleteCRD(ctx, h.client, crdName); err != nil {
+			if !errors.IsNotFound(err) {
+				logger.Error(err, "Failed to delete generated CRD", "name", crdName)
+				// Don't block deletion on CRD cleanup failure
+			}
+		} else {
+			logger.Info("Deleted generated CRD", "name", crdName)
+			if h.recorder != nil {
+				h.recorder.Eventf(tf, "Normal", "CRDDeleted", "Deleted generated CRD %s", crdName)
+			}
+		}
+	}
 
 	// Remove finalizer to allow deletion to proceed
 	logger.Info("Removing finalizer from Transform")
@@ -531,9 +420,4 @@ func (h *TransformHandlers) handleDeletion(ctx context.Context, tf *platformv1al
 
 	logger.Info("Transform deletion handled successfully")
 	return ctrl.Result{}, nil
-}
-
-// ptr returns a pointer to the given value
-func ptr[T any](v T) *T {
-	return &v
 }

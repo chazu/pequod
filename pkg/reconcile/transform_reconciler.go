@@ -21,14 +21,14 @@ type TransformReconciler struct {
 func NewTransformReconciler(
 	k8sClient client.Client,
 	scheme *runtime.Scheme,
-	renderer *platformloader.Renderer,
+	loader *platformloader.Loader,
 ) *TransformReconciler {
 	// Create handlers
 	handlers := NewTransformHandlers(
 		k8sClient,
 		scheme,
 		nil, // recorder will be set by controller
-		renderer,
+		loader,
 	)
 
 	return &TransformReconciler{

@@ -30,14 +30,13 @@ import (
 	"github.com/chazu/pequod/pkg/reconcile"
 )
 
-// TransformReconciler reconciles Transform resources
-// Transform is the single user-facing CRD for all platform types.
-// Platform definitions (WebService, Database, Queue, etc.) are CUE artifacts, not separate CRDs.
+// TransformReconciler reconciles Transform resources.
+// Transform is a platform definition that generates a CRD for developers to use.
+// Platform engineers create Transforms, which generate CRDs (e.g., WebService, Database).
 type TransformReconciler struct {
 	client.Client
 	Scheme         *runtime.Scheme
 	PlatformLoader *platformloader.Loader
-	Renderer       *platformloader.Renderer
 	Recorder       record.EventRecorder
 
 	// Handler-based reconciler
@@ -47,7 +46,7 @@ type TransformReconciler struct {
 // +kubebuilder:rbac:groups=platform.platform.example.com,resources=transforms,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=platform.platform.example.com,resources=transforms/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=platform.platform.example.com,resources=transforms/finalizers,verbs=update
-// +kubebuilder:rbac:groups=platform.platform.example.com,resources=resourcegraphs,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=apiextensions.k8s.io,resources=customresourcedefinitions,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile handles Transform resources
 func (r *TransformReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -64,13 +63,12 @@ func (r *TransformReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	r.reconciler = reconcile.NewTransformReconciler(
 		r.Client,
 		r.Scheme,
-		r.Renderer,
+		r.PlatformLoader,
 	)
 	r.reconciler.SetRecorder(r.Recorder)
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&platformv1alpha1.Transform{}).
-		Owns(&platformv1alpha1.ResourceGraph{}).
 		Named("transform").
 		Complete(r)
 }

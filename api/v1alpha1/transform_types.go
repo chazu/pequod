@@ -18,7 +18,6 @@ package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	runtime "k8s.io/apimachinery/pkg/runtime"
 )
 
 // CueRefType defines the type of CUE reference
@@ -152,28 +151,75 @@ type AdoptedResourceRef struct {
 	Namespace string `json:"namespace,omitempty"`
 }
 
-// TransformSpec defines the desired state of Transform
+// TransformSpec defines the desired state of Transform.
+// Transform is a platform definition that generates a CRD for developers to use.
 type TransformSpec struct {
 	// CueRef specifies how to locate the CUE platform module
 	// +kubebuilder:validation:Required
 	CueRef CueReference `json:"cueRef"`
 
-	// Input is the free-form input data for the CUE platform module
-	// This will be validated against the CUE schema defined in the platform module
-	// +kubebuilder:validation:Required
-	// +kubebuilder:pruning:PreserveUnknownFields
-	Input runtime.RawExtension `json:"input"`
-
-	// Adopt specifies existing resources to adopt into management
+	// Group is the API group for the generated CRD
+	// Defaults to "platform.pequod.io"
+	// +kubebuilder:default="platform.pequod.io"
 	// +optional
-	Adopt *AdoptSpec `json:"adopt,omitempty"`
+	Group string `json:"group,omitempty"`
+
+	// Version is the API version for the generated CRD
+	// Defaults to "v1alpha1"
+	// +kubebuilder:default="v1alpha1"
+	// +optional
+	Version string `json:"version,omitempty"`
+
+	// ShortNames are optional short names for the generated CRD
+	// +optional
+	ShortNames []string `json:"shortNames,omitempty"`
+
+	// Categories are optional categories for the generated CRD
+	// +optional
+	Categories []string `json:"categories,omitempty"`
+}
+
+// TransformPhase represents the current phase of a Transform
+// +kubebuilder:validation:Enum=Pending;Fetching;Generating;Ready;Failed
+type TransformPhase string
+
+const (
+	// TransformPhasePending indicates the Transform is pending processing
+	TransformPhasePending TransformPhase = "Pending"
+	// TransformPhaseFetching indicates the CUE module is being fetched
+	TransformPhaseFetching TransformPhase = "Fetching"
+	// TransformPhaseGenerating indicates the CRD is being generated
+	TransformPhaseGenerating TransformPhase = "Generating"
+	// TransformPhaseReady indicates the CRD has been successfully generated
+	TransformPhaseReady TransformPhase = "Ready"
+	// TransformPhaseFailed indicates an error occurred
+	TransformPhaseFailed TransformPhase = "Failed"
+)
+
+// GeneratedCRDReference contains information about a generated CRD
+type GeneratedCRDReference struct {
+	// APIVersion is the API version of instances (e.g., "apps.example.com/v1alpha1")
+	APIVersion string `json:"apiVersion"`
+
+	// Kind is the kind of instances (e.g., "WebService")
+	Kind string `json:"kind"`
+
+	// Name is the CRD resource name (e.g., "webservices.apps.example.com")
+	Name string `json:"name"`
+
+	// Plural is the plural form of the kind (e.g., "webservices")
+	Plural string `json:"plural"`
 }
 
 // TransformStatus defines the observed state of Transform
 type TransformStatus struct {
-	// ResourceGraphRef references the ResourceGraph created from this Transform
+	// Phase is the current phase of the Transform
 	// +optional
-	ResourceGraphRef *ObjectReference `json:"resourceGraphRef,omitempty"`
+	Phase TransformPhase `json:"phase,omitempty"`
+
+	// GeneratedCRD contains information about the generated CRD
+	// +optional
+	GeneratedCRD *GeneratedCRDReference `json:"generatedCRD,omitempty"`
 
 	// ResolvedCueRef contains the resolved CUE module reference
 	// +optional
@@ -182,8 +228,8 @@ type TransformStatus struct {
 	// Conditions represent the current state of the Transform
 	// Condition types include:
 	// - "CueFetched": CUE module fetched successfully
-	// - "Validated": Input validated against CUE schema
-	// - "Rendered": ResourceGraph created successfully
+	// - "SchemaExtracted": Input schema extracted from CUE
+	// - "CRDGenerated": CRD generated and applied to cluster
 	// +listType=map
 	// +listMapKey=type
 	// +optional
@@ -197,12 +243,14 @@ type TransformStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=tf
-// +kubebuilder:printcolumn:name="CueRef",type=string,JSONPath=`.spec.cueRef.ref`
+// +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
+// +kubebuilder:printcolumn:name="CRD",type=string,JSONPath=`.status.generatedCRD.name`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
-// Transform is the Schema for the transforms API
-// Transform is the single user-facing CRD for all platform types.
-// Platform definitions (WebService, Database, Queue, etc.) are CUE artifacts, not separate CRDs.
+// Transform is the Schema for the transforms API.
+// Transform is a platform definition that generates a CRD for developers to use.
+// Platform engineers create Transforms, which generate CRDs (e.g., WebService, Database).
+// Developers create instances of those CRDs, which trigger ResourceGraph creation.
 type Transform struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

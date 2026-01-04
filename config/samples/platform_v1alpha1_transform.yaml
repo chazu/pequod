@@ -1,19 +1,32 @@
 # Example Transform for a WebService platform
-# This demonstrates how to use the Transform CRD to deploy a web service
+# Transform is a platform definition that generates a CRD for developers to use.
+# Platform engineers create Transforms, which generate CRDs (e.g., WebService).
+# Developers then create instances of those CRDs to deploy their applications.
 apiVersion: platform.platform.example.com/v1alpha1
 kind: Transform
 metadata:
-  name: my-webservice
+  name: webservice
   namespace: default
 spec:
   # Reference to the CUE platform module
-  # Currently only "embedded" type is supported
+  # Currently only "embedded" type is fully supported
   cueRef:
     type: embedded
     ref: webservice
-  # Input data for the platform module
-  # This gets validated against the CUE schema
-  input:
-    image: nginx:latest
-    port: 80
-    replicas: 2
+
+  # Optional: Override the API group for generated CRD
+  # Defaults to "platform.pequod.io"
+  group: apps.example.com
+
+  # Optional: Override the API version
+  # Defaults to "v1alpha1"
+  version: v1alpha1
+
+  # Optional: Short names for the generated CRD
+  shortNames:
+    - ws
+
+  # Optional: Categories for the generated CRD
+  categories:
+    - pequod
+    - platform

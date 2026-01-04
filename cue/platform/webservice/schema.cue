@@ -1,5 +1,9 @@
 package webservice
 
+// #Input is the schema used for CRD generation
+// Aliased from #WebServiceSpec for compatibility with the schema extractor
+#Input: #WebServiceSpec
+
 // #WebServiceSpec defines the schema for WebService input
 // This matches the Go type in api/v1alpha1/webservice_types.go
 #WebServiceSpec: {

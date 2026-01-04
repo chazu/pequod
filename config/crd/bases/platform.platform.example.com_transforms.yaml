@@ -17,8 +17,11 @@ spec:
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
-    - jsonPath: .spec.cueRef.ref
-      name: CueRef
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.generatedCRD.name
+      name: CRD
       type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
@@ -27,9 +30,10 @@ spec:
     schema:
       openAPIV3Schema:
         description: |-
-          Transform is the Schema for the transforms API
-          Transform is the single user-facing CRD for all platform types.
-          Platform definitions (WebService, Database, Queue, etc.) are CUE artifacts, not separate CRDs.
+          Transform is the Schema for the transforms API.
+          Transform is a platform definition that generates a CRD for developers to use.
+          Platform engineers create Transforms, which generate CRDs (e.g., WebService, Database).
+          Developers create instances of those CRDs, which trigger ResourceGraph creation.
         properties:
           apiVersion:
             description: |-
@@ -49,103 +53,16 @@ spec:
           metadata:
             type: object
           spec:
-            description: TransformSpec defines the desired state of Transform
+            description: |-
+              TransformSpec defines the desired state of Transform.
+              Transform is a platform definition that generates a CRD for developers to use.
             properties:
-              adopt:
-                description: Adopt specifies existing resources to adopt into management
-                properties:
-                  labelSelector:
-                    description: LabelSelector selects resources to adopt by labels
-                      (used when Mode=LabelSelector)
-                    properties:
-                      matchExpressions:
-                        description: matchExpressions is a list of label selector
-                          requirements. The requirements are ANDed.
-                        items:
-                          description: |-
-                            A label selector requirement is a selector that contains values, a key, and an operator that
-                            relates the key and values.
-                          properties:
-                            key:
-                              description: key is the label key that the selector
-                                applies to.
-                              type: string
-                            operator:
-                              description: |-
-                                operator represents a key's relationship to a set of values.
-                                Valid operators are In, NotIn, Exists and DoesNotExist.
-                              type: string
-                            values:
-                              description: |-
-                                values is an array of string values. If the operator is In or NotIn,
-                                the values array must be non-empty. If the operator is Exists or DoesNotExist,
-                                the values array must be empty. This array is replaced during a strategic
-                                merge patch.
-                              items:
-                                type: string
-                              type: array
-                              x-kubernetes-list-type: atomic
-                          required:
-                          - key
-                          - operator
-                          type: object
-                        type: array
-                        x-kubernetes-list-type: atomic
-                      matchLabels:
-                        additionalProperties:
-                          type: string
-                        description: |-
-                          matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
-                          map is equivalent to an element of matchExpressions, whose key field is "key", the
-                          operator is "In", and the values array contains only "value". The requirements are ANDed.
-                        type: object
-                    type: object
-                    x-kubernetes-map-type: atomic
-                  mode:
-                    default: Explicit
-                    description: Mode specifies how resources are selected for adoption
-                    enum:
-                    - Explicit
-                    - LabelSelector
-                    type: string
-                  resources:
-                    description: Resources lists specific resources to adopt (used
-                      when Mode=Explicit)
-                    items:
-                      description: AdoptedResourceRef identifies a resource to adopt
-                      properties:
-                        apiVersion:
-                          description: APIVersion of the resource to adopt
-                          type: string
-                        kind:
-                          description: Kind of the resource to adopt
-                          type: string
-                        name:
-                          description: Name of the resource to adopt
-                          type: string
-                        namespace:
-                          description: Namespace of the resource to adopt (empty for
-                            cluster-scoped)
-                          type: string
-                        nodeId:
-                          description: |-
-                            NodeID is the ID of the graph node this resource maps to
-                            If empty, the system will try to match by GVK/namespace/name
-                          type: string
-                      required:
-                      - apiVersion
-                      - kind
-                      - name
-                      type: object
-                    type: array
-                  strategy:
-                    default: TakeOwnership
-                    description: Strategy specifies how adopted resources are managed
-                    enum:
-                    - TakeOwnership
-                    - Mirror
-                    type: string
-                type: object
+              categories:
+                description: Categories are optional categories for the generated
+                  CRD
+                items:
+                  type: string
+                type: array
               cueRef:
                 description: CueRef specifies how to locate the CUE platform module
                 properties:
@@ -189,15 +106,26 @@ spec:
                 - ref
                 - type
                 type: object
-              input:
+              group:
+                default: platform.pequod.io
                 description: |-
-                  Input is the free-form input data for the CUE platform module
-                  This will be validated against the CUE schema defined in the platform module
-                type: object
-                x-kubernetes-preserve-unknown-fields: true
+                  Group is the API group for the generated CRD
+                  Defaults to "platform.pequod.io"
+                type: string
+              shortNames:
+                description: ShortNames are optional short names for the generated
+                  CRD
+                items:
+                  type: string
+                type: array
+              version:
+                default: v1alpha1
+                description: |-
+                  Version is the API version for the generated CRD
+                  Defaults to "v1alpha1"
+                type: string
             required:
             - cueRef
-            - input
             type: object
           status:
             description: TransformStatus defines the observed state of Transform
@@ -207,8 +135,8 @@ spec:
                   Conditions represent the current state of the Transform
                   Condition types include:
                   - "CueFetched": CUE module fetched successfully
-                  - "Validated": Input validated against CUE schema
-                  - "Rendered": ResourceGraph created successfully
+                  - "SchemaExtracted": Input schema extracted from CUE
+                  - "CRDGenerated": CRD generated and applied to cluster
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -267,11 +195,43 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              generatedCRD:
+                description: GeneratedCRD contains information about the generated
+                  CRD
+                properties:
+                  apiVersion:
+                    description: APIVersion is the API version of instances (e.g.,
+                      "apps.example.com/v1alpha1")
+                    type: string
+                  kind:
+                    description: Kind is the kind of instances (e.g., "WebService")
+                    type: string
+                  name:
+                    description: Name is the CRD resource name (e.g., "webservices.apps.example.com")
+                    type: string
+                  plural:
+                    description: Plural is the plural form of the kind (e.g., "webservices")
+                    type: string
+                required:
+                - apiVersion
+                - kind
+                - name
+                - plural
+                type: object
               observedGeneration:
                 description: ObservedGeneration is the generation observed by the
                   controller
                 format: int64
                 type: integer
+              phase:
+                description: Phase is the current phase of the Transform
+                enum:
+                - Pending
+                - Fetching
+                - Generating
+                - Ready
+                - Failed
+                type: string
               resolvedCueRef:
                 description: ResolvedCueRef contains the resolved CUE module reference
                 properties:
@@ -284,30 +244,6 @@ spec:
                     description: FetchedAt is when the module was last fetched
                     format: date-time
                     type: string
-                type: object
-              resourceGraphRef:
-                description: ResourceGraphRef references the ResourceGraph created
-                  from this Transform
-                properties:
-                  apiVersion:
-                    description: APIVersion of the referent
-                    type: string
-                  kind:
-                    description: Kind of the referent
-                    type: string
-                  name:
-                    description: Name of the referent
-                    type: string
-                  namespace:
-                    description: Namespace of the referent (empty for cluster-scoped)
-                    type: string
-                  uid:
-                    description: UID of the referent
-                    type: string
-                required:
-                - apiVersion
-                - kind
-                - name
                 type: object
             type: object
         type: object
