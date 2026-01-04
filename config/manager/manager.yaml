@@ -63,7 +63,7 @@ spec:
         args:
           - --leader-elect
           - --health-probe-bind-address=:8081
-        image: ghcr.io/chazu/pequod:0.0.0
+        image: ghcr.io/chazu/pequod:latest
         name: manager
         ports: []
         securityContext:
