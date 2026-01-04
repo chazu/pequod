@@ -272,9 +272,12 @@ The controller exposes health endpoints on `:8081`:
 
 ## Documentation
 
-- **[phases.md](phases.md)**: Development roadmap broken into shippable phases
-- **[plan.md](plan.md)**: Detailed architectural specification
+- **[docs/tutorial.md](docs/tutorial.md)**: Step-by-step getting started guide
+- **[docs/user-guide.md](docs/user-guide.md)**: Complete user documentation and API reference
+- **[docs/platform-engineer-guide.md](docs/platform-engineer-guide.md)**: Creating custom CUE platform modules
+- **[docs/operations.md](docs/operations.md)**: Deployment, monitoring, and troubleshooting
 - **[docs/cue-modules.md](docs/cue-modules.md)**: CUE module format and OCI specification
+- **[phases.md](phases.md)**: Development roadmap broken into shippable phases
 
 ## Technology Stack
 
