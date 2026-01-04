@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -305,7 +306,7 @@ spec:
 `, transformName, testNamespace)
 
 			cmd := exec.Command("kubectl", "apply", "-f", "-")
-			cmd.Stdin = exec.Command("echo", transformYAML).Stdout
+			cmd.Stdin = strings.NewReader(transformYAML)
 			_, err := utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "Failed to create Transform")
 
@@ -381,7 +382,7 @@ spec:
 `, transformName, testNamespace)
 
 			cmd := exec.Command("kubectl", "apply", "-f", "-")
-			cmd.Stdin = exec.Command("echo", transformYAML).Stdout
+			cmd.Stdin = strings.NewReader(transformYAML)
 			_, err := utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
 
@@ -412,7 +413,7 @@ spec:
 `, transformName, testNamespace)
 
 			cmd = exec.Command("kubectl", "apply", "-f", "-")
-			cmd.Stdin = exec.Command("echo", updatedYAML).Stdout
+			cmd.Stdin = strings.NewReader(updatedYAML)
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
 
@@ -454,7 +455,7 @@ spec:
 `, transformName, testNamespace)
 
 			cmd := exec.Command("kubectl", "apply", "-f", "-")
-			cmd.Stdin = exec.Command("echo", transformYAML).Stdout
+			cmd.Stdin = strings.NewReader(transformYAML)
 			_, err := utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
 
