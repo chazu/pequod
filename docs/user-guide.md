@@ -7,16 +7,18 @@ This guide covers how to use Pequod to deploy and manage applications as a devel
 - [Overview](#overview)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
-- [Transform API Reference](#transform-api-reference)
+- [Platform Instance API](#platform-instance-api)
 - [Examples](#examples)
 - [Troubleshooting](#troubleshooting)
 
 ## Overview
 
-Pequod provides a simplified interface for deploying applications on Kubernetes. Instead of writing complex Kubernetes YAML, you create a `Transform` resource that specifies:
+Pequod provides a simplified interface for deploying applications on Kubernetes. Your platform engineering team has created custom CRDs (Custom Resource Definitions) that are tailored to your organization's needs.
 
-1. **What platform type** you want (e.g., `webservice`, `database`)
-2. **What configuration** you need (e.g., image, replicas, port)
+Instead of writing complex Kubernetes YAML, you create instances of these platform CRDs (e.g., `WebService`, `Database`) with a simple spec:
+
+1. **Find available platform types** - Your platform team has defined what's available
+2. **Create an instance** with the configuration you need (e.g., image, replicas, port)
 
 Pequod then:
 - Renders the appropriate Kubernetes resources (Deployments, Services, etc.)
@@ -57,28 +59,43 @@ kubectl get crd resourcegraphs.platform.platform.example.com
 
 # Check controller is running
 kubectl get pods -n pequod-system -l control-plane=controller-manager
+
+# List available platform types (generated CRDs)
+kubectl get crd -l pequod.io/managed=true
 ```
 
 ## Quick Start
 
-### 1. Create a WebService
+### 1. Discover Available Platform Types
+
+Your platform team creates `Transform` resources that generate CRDs for you to use:
+
+```bash
+# List available platform types
+kubectl get transforms
+
+# Example output:
+# NAME          PHASE   CRD                                AGE
+# webservice    Ready   webservices.apps.mycompany.com     5d
+# database      Ready   databases.apps.mycompany.com       3d
+```
+
+### 2. Create a Platform Instance
+
+Once you know what platform types are available, create an instance. For example, if `webservice` is available:
 
 Create a file called `my-app.yaml`:
 
 ```yaml
-apiVersion: platform.platform.example.com/v1alpha1
-kind: Transform
+apiVersion: apps.mycompany.com/v1alpha1
+kind: WebService
 metadata:
   name: my-app
   namespace: default
 spec:
-  cueRef:
-    type: Embedded
-    ref: webservice
-  input:
-    image: nginx:latest
-    port: 80
-    replicas: 2
+  image: nginx:latest
+  port: 80
+  replicas: 2
 ```
 
 Apply it:
@@ -87,27 +104,26 @@ Apply it:
 kubectl apply -f my-app.yaml
 ```
 
-### 2. Check Status
+### 3. Check Status
 
 ```bash
-# View Transform status
-kubectl get transform my-app -o yaml
+# View instance status
+kubectl get webservice my-app -o yaml
 
 # View the generated ResourceGraph
-kubectl get resourcegraph -l pequod.io/transform=my-app
+kubectl get resourcegraph -l pequod.io/instance=my-app
 
 # View created resources
-kubectl get deployment,service -l app=my-app
+kubectl get deployment,service -l app.kubernetes.io/instance=my-app
 ```
 
-### 3. Update the Application
+### 4. Update the Application
 
 Edit `my-app.yaml` to change replicas:
 
 ```yaml
 spec:
-  input:
-    replicas: 3  # Changed from 2
+  replicas: 3  # Changed from 2
 ```
 
 Apply the changes:
@@ -116,204 +132,153 @@ Apply the changes:
 kubectl apply -f my-app.yaml
 ```
 
-### 4. Delete the Application
+### 5. Delete the Application
 
 ```bash
-kubectl delete transform my-app
+kubectl delete webservice my-app
 ```
 
 This will automatically clean up all created resources.
 
-## Transform API Reference
+## Platform Instance API
 
-### Spec Fields
+Platform instances are created using the CRDs generated from Transform resources. The schema for each platform type is defined by your platform engineering team.
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `cueRef` | CueReference | Yes | Reference to the CUE platform module |
-| `input` | object | Yes | Platform-specific configuration values |
-| `adopt` | AdoptSpec | No | Configuration for adopting existing resources |
-| `paused` | boolean | No | When true, reconciliation is paused |
+### Discovering Available Fields
 
-### CueReference Types
+To see what fields are available for a platform type:
 
-#### Embedded (Built-in Platforms)
+```bash
+# Get the CRD schema
+kubectl explain webservice.spec
 
-```yaml
-spec:
-  cueRef:
-    type: Embedded
-    ref: webservice  # Built-in platform name
+# Get detailed field information
+kubectl explain webservice.spec.replicas
 ```
 
-Available embedded platforms:
-- `webservice` - Deployment + Service
+### Common Platform Instance Fields
 
-#### OCI Registry
+Most platform instances will have a `spec` section with fields defined by the CUE module's `#Input` definition. Common patterns include:
 
-```yaml
-spec:
-  cueRef:
-    type: oci
-    ref: ghcr.io/myorg/platforms/postgres:v1.0.0
-    pullSecretRef:
-      name: ghcr-credentials  # Optional for private registries
-```
+| Field | Type | Description |
+|-------|------|-------------|
+| `image` | string | Container image to deploy |
+| `port` | integer | Service port |
+| `replicas` | integer | Number of replicas |
 
-#### Git Repository
+The exact fields depend on your platform team's CUE module definitions.
 
-```yaml
-spec:
-  cueRef:
-    type: git
-    ref: https://github.com/myorg/platforms.git?ref=v1.0.0&path=postgres
-    pullSecretRef:
-      name: git-credentials  # Optional for private repos
-```
+### WebService Platform Example
 
-#### ConfigMap
-
-```yaml
-spec:
-  cueRef:
-    type: configmap
-    ref: my-platform-configmap  # ConfigMap name in same namespace
-```
-
-#### Inline CUE
-
-```yaml
-spec:
-  cueRef:
-    type: inline
-    ref: |
-      #Render: {
-        input: {
-          metadata: { name: string, namespace: string }
-          spec: { message: string }
-        }
-        output: {
-          metadata: { name: input.metadata.name, version: "v1" }
-          nodes: [{
-            id: "configmap"
-            object: {
-              apiVersion: "v1"
-              kind: "ConfigMap"
-              metadata: {
-                name: input.metadata.name
-                namespace: input.metadata.namespace
-              }
-              data: { message: input.spec.message }
-            }
-          }]
-        }
-      }
-```
-
-### WebService Platform Input
-
-The built-in `webservice` platform accepts these inputs:
+If your platform team has created a `webservice` Transform, the generated CRD might accept:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `image` | string | Required | Container image |
-| `port` | integer | Required | Service port |
+| `port` | integer | Required | Service port (1-65535) |
 | `replicas` | integer | 1 | Number of replicas |
-| `name` | string | Transform name | Resource name prefix |
 
-### Status Fields
+### Instance Status Fields
+
+Platform instances have status fields that show the current state:
 
 | Field | Description |
 |-------|-------------|
-| `phase` | Current phase: Pending, Rendering, Rendered, Failed |
+| `phase` | Current phase: Pending, Rendering, Ready, Failed |
 | `resourceGraphRef` | Reference to the created ResourceGraph |
-| `resolvedCueRef` | Resolved CUE module digest and fetch time |
 | `conditions` | Detailed condition statuses |
-| `violations` | Any policy violations |
+
+### Viewing Instance Status
+
+```bash
+# Get instance status
+kubectl get webservice my-app -o yaml
+
+# Check conditions
+kubectl get webservice my-app -o jsonpath='{.status.conditions}'
+```
 
 ## Examples
 
 ### Basic WebService
 
+Assuming your platform team has created a `webservice` Transform that generates a `WebService` CRD:
+
 ```yaml
-apiVersion: platform.platform.example.com/v1alpha1
-kind: Transform
+apiVersion: apps.mycompany.com/v1alpha1
+kind: WebService
 metadata:
   name: nginx-app
+  namespace: default
 spec:
-  cueRef:
-    type: Embedded
-    ref: webservice
-  input:
-    image: nginx:1.25
-    port: 80
-    replicas: 3
+  image: nginx:1.25
+  port: 80
+  replicas: 3
 ```
 
-### WebService with Custom Name
+### WebService with Minimal Configuration
+
+Using defaults defined by your platform team:
 
 ```yaml
-apiVersion: platform.platform.example.com/v1alpha1
-kind: Transform
+apiVersion: apps.mycompany.com/v1alpha1
+kind: WebService
 metadata:
-  name: my-frontend
+  name: simple-app
 spec:
-  cueRef:
-    type: Embedded
-    ref: webservice
-  input:
-    name: frontend-app
-    image: my-registry/frontend:v2.0.0
-    port: 8080
-    replicas: 2
+  image: my-registry/my-app:v1.0.0
+  port: 8080
+  # replicas defaults to value defined in CUE module
 ```
 
-### Adopting Existing Resources
+### Multiple Instances
 
-If you have existing resources you want Pequod to manage:
+You can create multiple instances of the same platform type:
 
 ```yaml
-apiVersion: platform.platform.example.com/v1alpha1
-kind: Transform
+---
+apiVersion: apps.mycompany.com/v1alpha1
+kind: WebService
 metadata:
-  name: adopt-existing
+  name: frontend
+  namespace: production
 spec:
-  cueRef:
-    type: Embedded
-    ref: webservice
-  input:
-    image: nginx:latest
-    port: 80
-  adopt:
-    mode: Explicit
-    strategy: TakeOwnership
-    resources:
-      - apiVersion: apps/v1
-        kind: Deployment
-        name: existing-deployment
-        namespace: default
+  image: my-registry/frontend:v2.0.0
+  port: 3000
+  replicas: 3
+---
+apiVersion: apps.mycompany.com/v1alpha1
+kind: WebService
+metadata:
+  name: backend
+  namespace: production
+spec:
+  image: my-registry/backend:v2.0.0
+  port: 8080
+  replicas: 5
 ```
 
 ### Pausing Reconciliation
 
-To temporarily stop reconciliation:
+To temporarily stop reconciliation on an instance:
 
 ```yaml
-apiVersion: platform.platform.example.com/v1alpha1
-kind: Transform
+apiVersion: apps.mycompany.com/v1alpha1
+kind: WebService
 metadata:
   name: my-app
   labels:
     pequod.io/paused: "true"  # Pauses reconciliation
 spec:
-  # ... rest of spec
+  image: nginx:latest
+  port: 80
 ```
 
 ## Troubleshooting
 
-### Transform stuck in Pending
+### Instance stuck in Pending
 
-**Symptoms**: Transform status shows `phase: Pending` for a long time.
+**Symptoms**: Instance status shows `phase: Pending` for a long time.
 
 **Causes and Solutions**:
 
@@ -323,36 +288,38 @@ spec:
    # If no pods, reinstall the operator
    ```
 
-2. **CRD not installed**
+2. **Transform not ready**
+   The Transform that generates your CRD might not be ready:
    ```bash
-   kubectl get crd transforms.platform.platform.example.com
-   # If not found, install CRDs
+   kubectl get transforms
+   # Check that the Transform for your platform type shows Phase: Ready
    ```
 
-### Transform shows Failed
+### Instance shows Failed
 
-**Symptoms**: Transform status shows `phase: Failed` with violations.
+**Symptoms**: Instance status shows `phase: Failed`.
 
 **Causes and Solutions**:
 
 1. **Invalid input**
    ```bash
-   kubectl get transform my-app -o jsonpath='{.status.violations}'
+   kubectl describe webservice my-app
    ```
-   Fix the input values according to the violation messages.
+   Check the conditions and events for validation errors.
 
-2. **CUE module not found**
-   Check the `cueRef` type and ref are correct. For embedded modules, ensure the platform name exists.
+2. **Policy violations**
+   Your platform team may have defined policies that your input violates.
+   Check the status conditions for violation messages.
 
 ### Resources not created
 
-**Symptoms**: Transform shows Rendered but resources don't exist.
+**Symptoms**: Instance shows Ready but resources don't exist.
 
 **Causes and Solutions**:
 
 1. **Check ResourceGraph status**
    ```bash
-   kubectl get resourcegraph -l pequod.io/transform=my-app -o yaml
+   kubectl get resourcegraph -l pequod.io/instance=my-app -o yaml
    ```
    Look at `status.phase` and `status.nodeStates` for errors.
 
@@ -364,13 +331,13 @@ spec:
 
 ### Resources not cleaning up on delete
 
-**Symptoms**: After deleting Transform, resources remain.
+**Symptoms**: After deleting instance, resources remain.
 
 **Causes and Solutions**:
 
 1. **Check finalizers**
    ```bash
-   kubectl get transform my-app -o jsonpath='{.metadata.finalizers}'
+   kubectl get webservice my-app -o jsonpath='{.metadata.finalizers}'
    ```
    If stuck, the controller might have issues. Check logs.
 
@@ -379,6 +346,25 @@ spec:
    ```bash
    kubectl get deployment my-app -o jsonpath='{.metadata.ownerReferences}'
    ```
+
+### Platform type not available
+
+**Symptoms**: `error: the server doesn't have a resource type "webservice"`
+
+**Causes and Solutions**:
+
+1. **Transform not created**
+   Your platform team needs to create a Transform first:
+   ```bash
+   kubectl get transforms
+   ```
+
+2. **Transform not ready**
+   The Transform might still be generating the CRD:
+   ```bash
+   kubectl get transform webservice -o yaml
+   ```
+   Wait for `phase: Ready`.
 
 ### Viewing Detailed Logs
 
@@ -395,13 +381,13 @@ kubectl edit deployment -n pequod-system pequod-controller-manager
 
 | Error | Meaning | Solution |
 |-------|---------|----------|
-| `#Render definition not found` | CUE module missing #Render | Check CUE module structure |
-| `failed to load embedded CUE module` | Unknown embedded platform | Use valid platform name |
-| `field manager conflict` | Another controller manages field | Use adoption to take ownership |
-| `resource not found` | Adoption target doesn't exist | Verify resource exists |
+| `#Render definition not found` | CUE module missing #Render | Contact platform team |
+| `field manager conflict` | Another controller manages field | Contact platform team |
+| `resource not found` | Referenced resource doesn't exist | Check your input values |
+| `validation failed` | Input doesn't match schema | Check field types and constraints |
 
 ## Getting Help
 
 - Check the [operations guide](operations.md) for deployment and monitoring details
-- Check the [platform engineer guide](platform-engineer-guide.md) for creating custom platforms
+- Contact your platform engineering team for platform-specific questions
 - File issues at https://github.com/chazu/pequod/issues

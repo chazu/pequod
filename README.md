@@ -1,6 +1,6 @@
 # Pequod - CUE-Powered Platform Operator
 
-A Kubernetes operator that enables platform engineering teams to create high-level abstractions using CUE language, with dependency-aware orchestration and policy enforcement.
+A Kubernetes operator that enables platform engineering teams to create high-level abstractions using CUE language, with dynamic CRD generation, dependency-aware orchestration, and policy enforcement.
 
 ## Project Status
 
@@ -10,7 +10,8 @@ A Kubernetes operator that enables platform engineering teams to create high-lev
 
 Pequod provides a platform engineering tool that:
 
-- **Abstracts complexity**: Developers interact with simple CRDs (like `Transform`), not raw Kubernetes YAML
+- **Generates custom CRDs**: Platform engineers define platforms using CUE, Pequod generates CRDs for developers to use
+- **Abstracts complexity**: Developers interact with simple, auto-generated CRDs (like `WebService`), not raw Kubernetes YAML
 - **Enforces policy**: CUE-based policies validate both inputs and rendered outputs
 - **Manages dependencies**: DAG-based execution ensures resources are created in the correct order with readiness gates
 - **Supports brownfield**: Adopt existing resources and safely abandon/orphan when needed
@@ -19,13 +20,14 @@ Pequod provides a platform engineering tool that:
 ## Key Features
 
 ### Developer Experience
-- Simple, stable CRDs (`Transform`, `ResourceGraph`)
+- Simple, auto-generated CRDs (e.g., `WebService`, `Database`) tailored to your organization
 - Developers never write CUE - platform teams own the complexity
 - Rich status reporting with per-resource state
 - Clear error messages and policy violation feedback
 
 ### Platform Engineering
-- CUE-based platform modules for schema, composition, and policy
+- Define platforms using CUE modules with schema, composition, and policy
+- `Transform` resources generate CRDs dynamically from CUE schemas
 - Versioned platform modules (embedded or remote via OCI)
 - Authoritative reconciliation using Server-Side Apply
 - Comprehensive inventory tracking and drift detection
@@ -131,51 +133,74 @@ pequod/
 ├── docs/                  # Additional documentation
 ├── internal/
 │   └── controller/       # Controller implementations
+│       ├── transform_controller.go      # Transform → CRD generation
+│       └── platforminstance_controller.go  # Instance → ResourceGraph
 ├── pkg/
 │   ├── apply/            # SSA applier and resource adoption
+│   ├── crd/              # CRD generation from schemas
 │   ├── graph/            # Graph types and DAG executor
 │   ├── inventory/        # Resource inventory tracking
 │   ├── metrics/          # Prometheus metrics (apply operations)
 │   ├── platformloader/   # CUE module loading (embedded, OCI)
 │   ├── readiness/        # Readiness predicate evaluation
-│   └── reconcile/        # Transform reconciliation handlers
+│   ├── reconcile/        # Reconciliation handlers
+│   └── schema/           # CUE to JSONSchema extraction
 └── test/                  # Test utilities
 ```
 
 ## Custom Resource Definitions
 
-### Transform
+### Transform (Platform Definition)
 
-The primary user-facing API. A Transform references a CUE platform module and provides input values:
+Created by **platform engineers** to define a platform type. A Transform references a CUE platform module and generates a CRD:
 
 ```yaml
 apiVersion: platform.platform.example.com/v1alpha1
 kind: Transform
 metadata:
-  name: my-webservice
+  name: webservice
 spec:
   cueRef:
-    type: Embedded
-    name: webservice
-  input:
-    name: my-app
-    image: nginx:latest
-    replicas: 3
+    type: embedded
+    ref: webservice
+  group: apps.mycompany.com  # Optional, defaults to platform.pequod.io
+  shortNames: [ws]
 ```
+
+When applied, Pequod extracts the schema from the CUE module and generates a new CRD (e.g., `WebService`).
+
+### Generated CRDs (Platform Instances)
+
+Created by **developers** using the CRDs generated from Transforms:
+
+```yaml
+apiVersion: apps.mycompany.com/v1alpha1
+kind: WebService
+metadata:
+  name: my-app
+  namespace: default
+spec:
+  image: nginx:latest
+  port: 80
+  replicas: 3
+```
+
+The schema for this CRD is automatically extracted from the CUE module's `#Input` definition.
 
 ### ResourceGraph
 
-An intermediate representation created by the Transform controller. Contains the rendered graph of Kubernetes resources with dependencies:
+An intermediate representation created by the platform instance controller. Contains the rendered graph of Kubernetes resources with dependencies:
 
 ```yaml
 apiVersion: platform.platform.example.com/v1alpha1
 kind: ResourceGraph
 metadata:
-  name: my-webservice-abc123
+  name: my-app-abc123
 spec:
   sourceRef:
-    kind: Transform
-    name: my-webservice
+    apiVersion: apps.mycompany.com/v1alpha1
+    kind: WebService
+    name: my-app
   graph:
     nodes:
       - id: deployment-my-app
@@ -244,15 +269,26 @@ The controller exposes health endpoints on `:8081`:
 
 ```
 ┌─────────────────┐
-│   Transform     │  ← User API (simple, stable)
+│    Transform    │  ← Platform Definition (created by platform engineers)
 └────────┬────────┘
-         │
+         │ extracts schema
          ▼
 ┌─────────────────┐
 │  CUE Platform   │  ← Platform logic (schema, policy, composition)
 │     Module      │
 └────────┬────────┘
+         │ generates
+         ▼
+┌─────────────────┐
+│  Generated CRD  │  ← e.g., WebService, Database CRD
+└────────┬────────┘
          │
+         ▼
+┌─────────────────┐
+│ Platform        │  ← Developer API (instances of generated CRDs)
+│ Instance        │
+└────────┬────────┘
+         │ renders
          ▼
 ┌─────────────────┐
 │  ResourceGraph  │  ← Intermediate representation (nodes + DAG)

@@ -279,21 +279,29 @@ readinessProbe:
 
 ### What to Backup
 
-1. **CRDs**: Transform and ResourceGraph definitions
+1. **CRDs**: Transform, ResourceGraph, and generated platform CRDs
 2. **Custom Resources**: All Transform and ResourceGraph objects
-3. **ConfigMaps**: Any CUE modules stored in ConfigMaps
+3. **Platform Instances**: Instances of generated CRDs (e.g., WebService)
+4. **ConfigMaps**: Any CUE modules stored in ConfigMaps
 
 ### Backup Commands
 
 ```bash
-# Backup all Transforms
+# Backup all Transforms (platform definitions)
 kubectl get transform -A -o yaml > transforms-backup.yaml
 
 # Backup all ResourceGraphs
 kubectl get resourcegraph -A -o yaml > resourcegraphs-backup.yaml
 
+# Backup platform instances (generated CRDs) - adjust for your platform types
+kubectl get webservice -A -o yaml > webservices-backup.yaml 2>/dev/null || true
+kubectl get database -A -o yaml > databases-backup.yaml 2>/dev/null || true
+
 # Backup CUE ConfigMaps
 kubectl get configmap -l pequod.io/cue-module=true -A -o yaml > cue-modules-backup.yaml
+
+# Backup generated CRDs
+kubectl get crd -l pequod.io/managed=true -o yaml > generated-crds-backup.yaml
 ```
 
 ### Recovery Procedure
@@ -413,15 +421,48 @@ kubectl logs -n pequod-system -l control-plane=controller-manager | grep <name>
 **Common Causes**:
 1. **Controller not running**: Check controller pod status
 2. **CUE module not found**: Verify cueRef type and ref
-3. **Rate limiting**: Check for high reconcile queue depth
+3. **Schema extraction failed**: Check Transform conditions for errors
 
-### Resources Not Being Created
+### CRD Not Generated
 
-**Symptoms**: Transform shows Rendered but no resources exist
+**Symptoms**: Transform phase stays in Generating or shows Failed
 
 **Diagnosis**:
 ```bash
-kubectl get resourcegraph -l pequod.io/transform=<name> -o yaml
+kubectl get transform <name> -o yaml
+kubectl describe transform <name>
+```
+
+**Common Causes**:
+1. **Missing #Input definition**: CUE module must define #Input
+2. **Invalid CUE syntax**: Check CUE module for errors
+3. **RBAC issues**: Controller needs permission to create CRDs
+
+### Platform Instances Not Working
+
+**Symptoms**: Instance of generated CRD not creating resources
+
+**Diagnosis**:
+```bash
+# Check instance status
+kubectl get <kind> <name> -o yaml
+
+# Check ResourceGraph
+kubectl get resourcegraph -l pequod.io/instance=<name> -o yaml
+```
+
+**Common Causes**:
+1. **Transform not ready**: Parent Transform must be in Ready phase
+2. **Missing #Render definition**: CUE module must define #Render
+3. **RBAC insufficient**: Controller lacks permission to create resource type
+
+### Resources Not Being Created
+
+**Symptoms**: Instance shows Ready but no resources exist
+
+**Diagnosis**:
+```bash
+kubectl get resourcegraph -l pequod.io/instance=<name> -o yaml
 kubectl describe resourcegraph <resourcegraph-name>
 ```
 
@@ -485,9 +526,12 @@ kubectl logs -n pequod-system -l control-plane=controller-manager | grep "fetch"
 
 | Event | Meaning | Action |
 |-------|---------|--------|
-| `CueFetchFailed` | Failed to fetch CUE module | Check ref and credentials |
-| `CueRenderFailed` | CUE evaluation error | Check CUE module for errors |
-| `PolicyViolation` | Input failed policy check | Fix input or update policy |
+| `CueFetchFailed` | Failed to fetch CUE module | Check cueRef and credentials |
+| `SchemaExtractionFailed` | Failed to extract #Input from CUE | Check CUE module has #Input definition |
+| `CRDGenerationFailed` | Failed to generate CRD | Check controller logs for details |
+| `CRDApplied` | Successfully generated and applied CRD | Normal operation |
+| `CueRenderFailed` | CUE #Render evaluation error | Check CUE module for errors |
+| `PolicyViolation` | Input failed policy check | Fix instance spec or update policy |
 | `ApplyFailed` | Failed to apply resource | Check RBAC and resource spec |
 | `ReadinessTimeout` | Resource didn't become ready | Check resource status |
 | `AdoptionFailed` | Failed to adopt resource | Check resource exists and permissions |

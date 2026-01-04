@@ -2,27 +2,41 @@
 
 Welcome to the Pequod documentation! This directory contains detailed guides for platform teams and developers.
 
+## Architecture Overview
+
+Pequod uses a **dynamic CRD generation architecture**:
+
+1. **Platform Engineers** create `Transform` resources that define platform types
+2. **Pequod** extracts schemas from CUE modules and generates CRDs (e.g., `WebService`)
+3. **Developers** create instances of the generated CRDs
+4. **Pequod** renders CUE templates and creates ResourceGraphs
+5. **ResourceGraph Controller** applies resources in dependency order
+
+```
+Transform (Platform Definition) → Generated CRD → Instance → ResourceGraph → Resources
+```
+
 ## Quick Answer: How Do Platform Teams Deploy CUE Modules?
 
-Platform teams have **three options**:
+Platform teams have **three options** for deploying CUE modules referenced by Transforms:
 
-### 1. Embedded Modules (v0.1.0 - Recommended for Start)
+### 1. Embedded Modules (Recommended for Start)
 - **How**: CUE files bundled in operator image using `//go:embed`
 - **Update**: Rebuild and redeploy operator
 - **Best for**: Initial releases, stable platforms, air-gapped environments
-- **Speed**: ⚡ Instant (no network)
+- **Speed**: Instant (no network)
 
-### 2. OCI Registry (v0.2.0+ - Recommended for Production)
+### 2. OCI Registry (Recommended for Production)
 - **How**: Package CUE as OCI artifact, push to registry
-- **Update**: Push new version, developers update `platformRef`
+- **Update**: Push new version, update Transform's `cueRef`
 - **Best for**: Production, frequent updates, large organizations
-- **Speed**: 🚀 Fast (cached after first fetch)
+- **Speed**: Fast (cached after first fetch)
 
-### 3. Git Repository (v0.3.0+ - Optional)
+### 3. Git Repository (Optional)
 - **How**: Store CUE in Git repo, operator clones at runtime
-- **Update**: Git commit/tag, developers update `platformRef`
+- **Update**: Git commit/tag, update Transform's `cueRef`
 - **Best for**: Small teams, GitOps workflows
-- **Speed**: 🐌 Slower (clone overhead)
+- **Speed**: Slower (clone overhead)
 
 ## Documentation Index
 
@@ -62,51 +76,65 @@ Platform teams have **three options**:
 
 ## Quick Examples
 
-### Embedded Module (Phase 1)
+### Step 1: Platform Engineer Creates Transform
 
 ```yaml
-apiVersion: platform.example.com/v1alpha1
+apiVersion: platform.platform.example.com/v1alpha1
+kind: Transform
+metadata:
+  name: webservice
+spec:
+  cueRef:
+    type: embedded
+    ref: webservice
+  group: apps.mycompany.com
+  shortNames: [ws]
+```
+
+This generates a `WebService` CRD in the `apps.mycompany.com` group.
+
+### Step 2: Developer Creates Platform Instance
+
+```yaml
+apiVersion: apps.mycompany.com/v1alpha1
 kind: WebService
 metadata:
   name: my-app
+  namespace: default
 spec:
-  platformRef:
-    embedded: v1.0.0  # References embedded module
   image: myregistry.com/my-app:latest
   port: 8080
   replicas: 3
 ```
 
-### OCI Module (Phase 9)
+The schema for the `spec` is automatically derived from the CUE module's `#Input` definition.
+
+### Using OCI Module
 
 ```yaml
-apiVersion: platform.example.com/v1alpha1
-kind: WebService
+apiVersion: platform.platform.example.com/v1alpha1
+kind: Transform
 metadata:
-  name: my-app
+  name: webservice
 spec:
-  platformRef:
-    # Use digest for immutability
-    oci: "myregistry.com/platform-modules/webservice@sha256:abc123..."
-  image: myregistry.com/my-app:latest
-  port: 8080
-  replicas: 3
+  cueRef:
+    type: oci
+    ref: "myregistry.com/platform-modules/webservice@sha256:abc123..."
+  group: apps.mycompany.com
 ```
 
-### Git Module (Phase 9)
+### Using Git Module
 
 ```yaml
-apiVersion: platform.example.com/v1alpha1
-kind: WebService
+apiVersion: platform.platform.example.com/v1alpha1
+kind: Transform
 metadata:
-  name: my-app
+  name: webservice
 spec:
-  platformRef:
-    # Use commit SHA for immutability
-    git: "https://github.com/myorg/platform-modules.git?ref=abc123&path=webservice/v1.0.0"
-  image: myregistry.com/my-app:latest
-  port: 8080
-  replicas: 3
+  cueRef:
+    type: git
+    ref: "https://github.com/myorg/platform-modules.git?ref=v1.0.0&path=webservice"
+  group: apps.mycompany.com
 ```
 
 ## Platform Team Workflow Summary
@@ -115,79 +143,106 @@ spec:
 
 ```bash
 # 1. Create CUE module
-cd cue/platform/v1.0.0/
+cd cue/platform/webservice/
 # ... create schema.cue, render.cue, policy/*.cue ...
 
 # 2. Commit to operator repo
-git add cue/platform/v1.0.0
-git commit -m "Add platform module v1.0.0"
+git add cue/platform/webservice
+git commit -m "Add webservice platform module"
 
 # 3. Rebuild operator
 make docker-build IMG=myregistry.com/pequod:v0.1.0
 make docker-push IMG=myregistry.com/pequod:v0.1.0
 
 # 4. Deploy operator
-kubectl set image deployment/pequod-controller-manager \
-    manager=myregistry.com/pequod:v0.1.0
+kubectl apply -k config/default
+
+# 5. Create Transform to generate CRD
+kubectl apply -f - <<EOF
+apiVersion: platform.platform.example.com/v1alpha1
+kind: Transform
+metadata:
+  name: webservice
+spec:
+  cueRef:
+    type: embedded
+    ref: webservice
+  group: apps.mycompany.com
+EOF
 ```
 
 ### OCI (Production)
 
 ```bash
 # 1. Create CUE module (in separate repo)
-cd platform-modules/webservice/v1.2.0/
-# ... create schema.cue, render.cue, policy/*.cue ...
+cd platform-modules/webservice/
+# ... create schema.cue, render.cue with #Input and #Render ...
 
 # 2. Package and push to registry
-docker build -t myregistry.com/platform-modules/webservice:v1.2.0 .
-docker push myregistry.com/platform-modules/webservice:v1.2.0
+cue mod publish v1.2.0
+# Or use oras for custom packaging
 
-# 3. Get digest
-DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' \
-    myregistry.com/platform-modules/webservice:v1.2.0)
-
-# 4. Announce to developers
-echo "New module available: $DIGEST"
+# 3. Create/update Transform
+kubectl apply -f - <<EOF
+apiVersion: platform.platform.example.com/v1alpha1
+kind: Transform
+metadata:
+  name: webservice
+spec:
+  cueRef:
+    type: oci
+    ref: "myregistry.com/platform-modules/webservice:v1.2.0"
+  group: apps.mycompany.com
+EOF
 ```
 
-Developers update their WebService CRs independently - no operator restart needed!
+Transform updates automatically regenerate the CRD with the new schema!
 
 ## Key Concepts
 
+### Transform
+A platform definition created by platform engineers. A Transform:
+- References a CUE module containing `#Input` and `#Render` definitions
+- Specifies the API group and version for the generated CRD
+- Generates a new CRD dynamically from the CUE schema
+
 ### Platform Module
 A versioned CUE package that defines:
-- **Schema**: Input validation for WebService
-- **Rendering**: How to convert WebService → Kubernetes resources
+- **#Input**: Schema for the generated CRD's spec (becomes JSONSchema)
+- **#Render**: Template that converts instance spec → ResourceGraph
 - **Policy**: Constraints on inputs and outputs
-- **Graph**: Dependencies and readiness rules
 
-### Graph Artifact
-The intermediate representation produced by evaluating CUE:
+### Generated CRD
+A Kubernetes CRD dynamically created from a Transform:
+- Schema extracted from CUE `#Input` definition
+- Instances are watched by the platform instance controller
+- Each instance creates a ResourceGraph
+
+### ResourceGraph
+The intermediate representation produced by evaluating CUE with instance data:
 - **Nodes**: Kubernetes resources to create
 - **Dependencies**: Ordering constraints (DAG)
 - **Readiness**: When each resource is considered ready
 - **Metadata**: Version, hash, timestamp
 
-### Platform Reference
-How developers specify which module version to use:
-- `embedded: v1.0.0` - Bundled with operator
-- `oci: registry/module@sha256:...` - From OCI registry
-- `git: github.com/org/repo?ref=...` - From Git repo
-
-## Architecture Overview
+## Architecture Overview (Detailed)
 
 ```
-Developer → WebService CR → Operator → CUE Module → Graph → Resources
-                                ↓
-                          Platform Team
-                          (creates modules)
+Platform Engineer → Transform → CRD Generated
+                                     ↓
+Developer → Platform Instance (e.g., WebService CR)
+                                     ↓
+                        Instance Controller → CUE Module → ResourceGraph
+                                                                ↓
+                                          ResourceGraph Controller → Resources
 ```
 
-1. **Platform Team** creates CUE modules defining platform abstractions
-2. **Developer** creates WebService CR with simple spec
-3. **Operator** loads CUE module and evaluates it with WebService spec
-4. **CUE** produces Graph artifact with resources and dependencies
-5. **Operator** applies resources in dependency order with readiness gates
+1. **Platform Engineer** creates Transform referencing a CUE module
+2. **Transform Controller** extracts schema from CUE and generates CRD
+3. **Developer** creates an instance of the generated CRD
+4. **Instance Controller** loads CUE module and renders with instance spec
+5. **CUE** produces ResourceGraph with resources and dependencies
+6. **ResourceGraph Controller** applies resources in dependency order
 
 ## Next Steps
 

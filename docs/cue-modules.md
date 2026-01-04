@@ -393,33 +393,49 @@ Regardless of source, all Pequod platform modules must follow this structure:
 ```cue
 package myplatform
 
-// Input schema - defines what users can specify
+// #Input - REQUIRED for CRD generation
+// This schema is extracted and converted to JSONSchema for the generated CRD's spec
 #Input: {
-  name:      string
-  namespace: string | *"default"
+  image:     string & !=""          // Required field
+  port:      int & >=1 & <=65535    // Required with constraints
+  replicas?: int & >=0 & <=100      // Optional field (? suffix)
   // ... other fields
 }
 
-// Input instance - bound to Transform.spec.input
-input: #Input
+// #Render - REQUIRED for ResourceGraph generation
+// This template converts instance data into a ResourceGraph
+#Render: {
+  input: {
+    metadata: { name: string, namespace: string }
+    spec: #Input
+  }
+  output: #Graph
+}
 
-// Graph output - defines resources to create
-graph: {
+// #Graph - Output structure
+#Graph: {
   metadata: {
     name:    string
     version: string | *"v1"
   }
   nodes: [...#Node]
+  violations: [...#Violation]
 }
 
 #Node: {
   id:        string
-  object:    string  // YAML-encoded Kubernetes resource
+  object:    _                       // Kubernetes resource object
   dependsOn: [...string] | *[]
-  readyWhen: #ReadinessPredicate | *{type: "exists"}
-  applyPolicy: #ApplyPolicy | *{mode: "ssa"}
+  readyWhen: [...#ReadinessPredicate] | *[{type: "Exists"}]
+  applyPolicy: #ApplyPolicy | *{mode: "Apply"}
 }
 ```
+
+**Key Points:**
+- `#Input` is extracted by Pequod to generate the CRD schema
+- `#Render` is evaluated with instance data to produce a ResourceGraph
+- Fields without `?` in `#Input` are required in the generated CRD
+- Fields with `?` are optional
 
 ### Example: WebService Platform
 

@@ -5,8 +5,10 @@ This guide covers how to create, test, and distribute CUE platform modules for P
 ## Table of Contents
 
 - [Overview](#overview)
+- [Architecture](#architecture)
 - [Platform Module Structure](#platform-module-structure)
 - [Creating a Platform Module](#creating-a-platform-module)
+- [Creating a Transform](#creating-a-transform)
 - [Schema Design](#schema-design)
 - [Render Templates](#render-templates)
 - [Policy Authoring](#policy-authoring)
@@ -15,16 +17,34 @@ This guide covers how to create, test, and distribute CUE platform modules for P
 
 ## Overview
 
-Platform modules are CUE packages that define:
+As a platform engineer, you create **platform types** that developers can use to deploy applications. Pequod uses a dynamic CRD generation architecture:
 
-1. **Schema** (`schema.cue`): Input validation and types
-2. **Render** (`render.cue`): Resource generation templates
-3. **Policy** (`policy.cue`): Constraints and guardrails (optional)
+1. You create **CUE modules** that define input schemas and resource templates
+2. You create **Transform resources** that reference your CUE modules
+3. Pequod **generates CRDs** from your CUE schemas (e.g., `WebService`, `Database`)
+4. Developers create **instances** of these generated CRDs
+5. Pequod **renders and applies** resources based on the CUE templates
 
-Developers create `Transform` resources with inputs. Pequod evaluates the CUE module to produce a `ResourceGraph` containing Kubernetes resources with dependencies.
+## Architecture
 
 ```
-Transform (input) → CUE Module → ResourceGraph (output) → Kubernetes Resources
+You create:                              Developers use:
+┌──────────────┐    ┌───────────┐        ┌───────────────┐
+│ CUE Module   │───▶│ Transform │───────▶│ Generated CRD │
+│ (#Input,     │    │           │        │ (WebService)  │
+│  #Render)    │    └───────────┘        └───────┬───────┘
+└──────────────┘                                 │
+                                                 ▼
+                                         ┌───────────────┐
+                                         │ Platform      │
+                                         │ Instance      │
+                                         └───────┬───────┘
+                                                 │
+                                                 ▼
+                                         ┌───────────────┐
+                                         │ ResourceGraph │
+                                         │ → Resources   │
+                                         └───────────────┘
 ```
 
 ## Platform Module Structure
@@ -33,23 +53,37 @@ A typical platform module has this structure:
 
 ```
 myplatform/
-├── schema.cue      # Input schema and types
-├── render.cue      # Resource templates and graph generation
+├── cue.mod/
+│   └── module.cue  # Module metadata
+├── schema.cue      # #Input schema definition (becomes CRD spec)
+├── render.cue      # #Render template that produces ResourceGraph
 ├── policy.cue      # Policies and constraints (optional)
 └── README.md       # Documentation
 ```
 
 ### Required Definitions
 
-Every platform module must define:
+Every platform module must define two key definitions:
 
-1. **`#Render`** - The main render template that takes input and produces output
+1. **`#Input`** - The schema for the generated CRD's spec (converted to JSONSchema)
+
+```cue
+// #Input defines what developers can specify in their instance spec
+// This is extracted and converted to a Kubernetes CRD schema
+#Input: {
+    image:    string & !=""      // Required: container image
+    port:     int & >=1 & <=65535 // Required: service port
+    replicas?: int & >=0 & <=100  // Optional: number of replicas
+}
+```
+
+2. **`#Render`** - The template that converts instance data to a ResourceGraph
 
 ```cue
 #Render: {
     input: {
         metadata: { name: string, namespace: string }
-        spec: #YourInputSchema
+        spec: #Input
     }
     output: #Graph
 }
@@ -59,33 +93,31 @@ Every platform module must define:
 
 ### Step 1: Define the Input Schema
 
-Create `schema.cue` with your input types:
+Create `schema.cue` with your `#Input` definition. This schema will be extracted and converted to a JSONSchema for the generated CRD:
 
 ```cue
 package myplatform
 
-// #MyPlatformSpec defines what users can configure
-#MyPlatformSpec: {
-    // Required fields
+// #Input defines what developers can configure in their instance spec
+// This becomes the CRD's spec schema
+#Input: {
+    // Required fields (no ? suffix)
     image: string & !=""
     port:  int & >=1 & <=65535
 
     // Optional fields with defaults
     replicas?: int & >=0 & <=100
 
-    // Constrained fields
+    // Constrained fields with default value
     environment: *"development" | "staging" | "production"
 }
-
-// #MyPlatformInput is the complete input structure
-#MyPlatformInput: {
-    metadata: {
-        name:      string
-        namespace: string
-    }
-    spec: #MyPlatformSpec
-}
 ```
+
+**Important**: The `#Input` definition is special - Pequod extracts it to generate the CRD schema. Use standard CUE constraints:
+- Required fields: no `?` suffix
+- Optional fields: `?` suffix (e.g., `replicas?`)
+- Defaults: `*value` (e.g., `*"development"`)
+- Constraints: `& >=1 & <=100`
 
 ### Step 2: Define the Output Graph Types
 
@@ -138,13 +170,16 @@ package myplatform
 
 ### Step 3: Create the Render Template
 
-Add the `#Render` definition:
+Add the `#Render` definition that transforms instance data into a ResourceGraph:
 
 ```cue
 package myplatform
 
 #Render: {
-    input: #MyPlatformInput
+    input: {
+        metadata: { name: string, namespace: string }
+        spec: #Input
+    }
 
     output: #Graph & {
         metadata: {
@@ -230,6 +265,74 @@ package myplatform
         violations: []
     }
 }
+```
+
+## Creating a Transform
+
+Once your CUE module is ready, create a `Transform` resource to generate the CRD:
+
+### Transform Spec
+
+```yaml
+apiVersion: platform.platform.example.com/v1alpha1
+kind: Transform
+metadata:
+  name: myplatform
+spec:
+  cueRef:
+    type: embedded      # or: oci, git, configmap, inline
+    ref: myplatform     # module name or reference
+  group: apps.mycompany.com        # API group for generated CRD
+  version: v1alpha1                 # API version (default)
+  shortNames: [mp]                  # Short names for kubectl
+  categories: [pequod, platform]    # Categories for grouping
+```
+
+### Transform Status
+
+After applying, check the Transform status:
+
+```bash
+kubectl get transform myplatform -o yaml
+```
+
+Status fields:
+- `phase`: Pending, Fetching, Generating, Ready, Failed
+- `generatedCRD`: Information about the generated CRD
+  - `apiVersion`: e.g., `apps.mycompany.com/v1alpha1`
+  - `kind`: e.g., `MyPlatform`
+  - `name`: CRD name, e.g., `myplatforms.apps.mycompany.com`
+  - `plural`: e.g., `myplatforms`
+- `conditions`: CueFetched, SchemaExtracted, CRDGenerated
+
+### Example: Complete Transform
+
+```yaml
+apiVersion: platform.platform.example.com/v1alpha1
+kind: Transform
+metadata:
+  name: webservice
+spec:
+  cueRef:
+    type: oci
+    ref: ghcr.io/myorg/platforms/webservice:v1.0.0
+    pullSecretRef:
+      name: ghcr-credentials
+  group: apps.mycompany.com
+  shortNames: [ws]
+```
+
+After applying, developers can use:
+
+```yaml
+apiVersion: apps.mycompany.com/v1alpha1
+kind: WebService
+metadata:
+  name: my-app
+spec:
+  image: nginx:latest
+  port: 80
+  replicas: 3
 ```
 
 ## Schema Design
@@ -461,26 +564,43 @@ kubectl create configmap myplatform \
   --from-file=render.cue
 ```
 
-2. Create a Transform using it:
+2. Create a Transform to generate the CRD:
 
 ```yaml
 apiVersion: platform.platform.example.com/v1alpha1
 kind: Transform
 metadata:
-  name: test
+  name: myplatform
 spec:
   cueRef:
     type: configmap
     ref: myplatform
-  input:
-    image: nginx:latest
-    port: 80
+  group: test.example.com
 ```
 
-3. Verify the ResourceGraph:
+3. Wait for CRD generation:
 
 ```bash
-kubectl get resourcegraph -l pequod.io/transform=test -o yaml
+kubectl get transform myplatform -w
+# Wait for Phase: Ready
+```
+
+4. Create an instance of the generated CRD:
+
+```yaml
+apiVersion: test.example.com/v1alpha1
+kind: MyPlatform
+metadata:
+  name: test-instance
+spec:
+  image: nginx:latest
+  port: 80
+```
+
+5. Verify the ResourceGraph:
+
+```bash
+kubectl get resourcegraph -l pequod.io/instance=test-instance -o yaml
 ```
 
 ## Versioning and Distribution

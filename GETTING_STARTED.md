@@ -1,6 +1,16 @@
 # Getting Started with Pequod Development
 
-This guide walks you through setting up your development environment and starting Phase 0 of the project.
+This guide walks you through setting up your development environment for Pequod.
+
+## Architecture Overview
+
+Pequod uses a dynamic CRD generation architecture:
+
+1. **Platform Engineers** create `Transform` resources that define platform types
+2. **Pequod** extracts schemas from CUE modules and generates CRDs (e.g., `WebService`)
+3. **Developers** create instances of the generated CRDs
+4. **Pequod** renders CUE templates and creates ResourceGraphs
+5. **ResourceGraph Controller** applies resources in dependency order
 
 ## Prerequisites
 
@@ -303,20 +313,17 @@ echo "✓ Package structure created"
 
 ## Next Steps
 
-Once Phase 0 is complete, proceed to **Phase 1: Core Types and CRD** in [phases.md](phases.md).
+Once Phase 0 is complete, proceed to the implementation phases in [phases.md](phases.md).
 
-### Phase 1 Preview
+### Key Implementation Areas
 
-You'll be creating:
-1. WebService CRD with Kubebuilder
-2. Graph artifact types
-3. Readiness predicate types
-4. Inventory types
+The main implementation phases involve:
 
-Command to start Phase 1:
-```bash
-kubebuilder create api --group platform --version v1alpha1 --kind WebService
-```
+1. **Schema Extraction** (`pkg/schema/`) - Extract JSONSchema from CUE `#Input` definitions
+2. **CRD Generation** (`pkg/crd/`) - Generate Kubernetes CRDs from extracted schemas
+3. **Transform Controller** - Generates CRDs from Transform resources
+4. **Platform Instance Controller** - Watches generated CRDs, creates ResourceGraphs
+5. **ResourceGraph Controller** - Executes the DAG (unchanged from original design)
 
 ## Troubleshooting
 

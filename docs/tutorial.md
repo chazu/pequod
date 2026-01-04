@@ -1,6 +1,6 @@
 # Pequod Tutorial: Getting Started
 
-This tutorial walks you through deploying your first application with Pequod, from installation to cleanup.
+This tutorial walks you through deploying your first application with Pequod, from installation to cleanup. You'll see how platform engineers create platform types and how developers use them.
 
 ## Prerequisites
 
@@ -63,24 +63,77 @@ NAME                                            CREATED AT
 transforms.platform.platform.example.com        2024-01-01T00:00:00Z
 ```
 
-## Step 3: Create Your First Transform
+## Step 3: Create a Platform Type (Platform Engineer Role)
 
-Create a file called `my-first-app.yaml`:
+First, we'll act as a platform engineer and create a `Transform` that generates a `WebService` CRD.
+
+Create a file called `webservice-transform.yaml`:
 
 ```yaml
 apiVersion: platform.platform.example.com/v1alpha1
 kind: Transform
 metadata:
+  name: webservice
+spec:
+  cueRef:
+    type: embedded
+    ref: webservice
+  group: apps.tutorial.io
+  shortNames: [ws]
+```
+
+Apply it:
+
+```bash
+kubectl apply -f webservice-transform.yaml
+```
+
+Expected output:
+```
+transform.platform.platform.example.com/webservice created
+```
+
+## Step 4: Watch the CRD Generation
+
+Watch the Transform status:
+
+```bash
+kubectl get transform webservice -w
+```
+
+You'll see the status progress:
+```
+NAME         PHASE        CRD                                 AGE
+webservice   Pending      <none>                              0s
+webservice   Fetching     <none>                              1s
+webservice   Generating   <none>                              2s
+webservice   Ready        webservices.apps.tutorial.io        3s
+```
+
+Press `Ctrl+C` to stop watching.
+
+Verify the CRD was created:
+
+```bash
+kubectl get crd webservices.apps.tutorial.io
+```
+
+## Step 5: Create Your First Application (Developer Role)
+
+Now we'll act as a developer and create an instance of the `WebService` platform type.
+
+Create a file called `my-first-app.yaml`:
+
+```yaml
+apiVersion: apps.tutorial.io/v1alpha1
+kind: WebService
+metadata:
   name: my-first-app
   namespace: default
 spec:
-  cueRef:
-    type: Embedded
-    ref: webservice
-  input:
-    image: nginx:1.25-alpine
-    port: 80
-    replicas: 2
+  image: nginx:1.25-alpine
+  port: 80
+  replicas: 2
 ```
 
 Apply it:
@@ -91,35 +144,29 @@ kubectl apply -f my-first-app.yaml
 
 Expected output:
 ```
-transform.platform.platform.example.com/my-first-app created
+webservice.apps.tutorial.io/my-first-app created
 ```
 
-## Step 4: Watch the Reconciliation
+## Step 6: Watch the Reconciliation
 
-Watch the Transform status:
+Watch the WebService status:
 
 ```bash
-kubectl get transform my-first-app -w
+kubectl get webservice my-first-app -w
 ```
 
-You'll see the status progress:
-```
-NAME           PHASE      AGE
-my-first-app   Pending    0s
-my-first-app   Rendering  1s
-my-first-app   Rendered   2s
-```
+You'll see the status progress as resources are created.
 
 Press `Ctrl+C` to stop watching.
 
-## Step 5: Explore What Was Created
+## Step 7: Explore What Was Created
 
 ### View the ResourceGraph
 
 Pequod creates a ResourceGraph that contains the rendered resources:
 
 ```bash
-kubectl get resourcegraph -l pequod.io/transform=my-first-app
+kubectl get resourcegraph -l pequod.io/instance=my-first-app
 ```
 
 Expected output:
@@ -131,7 +178,7 @@ my-first-app-abc123xyz   Completed   2       30s
 View the full ResourceGraph:
 
 ```bash
-kubectl get resourcegraph -l pequod.io/transform=my-first-app -o yaml
+kubectl get resourcegraph -l pequod.io/instance=my-first-app -o yaml
 ```
 
 ### View the Created Resources
@@ -139,7 +186,7 @@ kubectl get resourcegraph -l pequod.io/transform=my-first-app -o yaml
 Pequod created a Deployment and a Service:
 
 ```bash
-kubectl get deployment,service -l app.kubernetes.io/name=my-first-app
+kubectl get deployment,service -l app.kubernetes.io/instance=my-first-app
 ```
 
 Expected output:
@@ -154,7 +201,7 @@ service/my-first-app   ClusterIP   10.96.xxx.xxx   80/TCP    1m
 ### Check the Pods
 
 ```bash
-kubectl get pods -l app.kubernetes.io/name=my-first-app
+kubectl get pods -l app.kubernetes.io/instance=my-first-app
 ```
 
 Expected output:
@@ -164,7 +211,7 @@ my-first-app-xxxxxxxxx-xxxxx    1/1     Running   0          1m
 my-first-app-xxxxxxxxx-yyyyy    1/1     Running   0          1m
 ```
 
-## Step 6: Access Your Application
+## Step 8: Access Your Application
 
 Port-forward to test the application:
 
@@ -180,24 +227,20 @@ Stop the port-forward:
 kill %1
 ```
 
-## Step 7: Update the Application
+## Step 9: Update the Application
 
 Let's scale up to 3 replicas. Edit `my-first-app.yaml`:
 
 ```yaml
-apiVersion: platform.platform.example.com/v1alpha1
-kind: Transform
+apiVersion: apps.tutorial.io/v1alpha1
+kind: WebService
 metadata:
   name: my-first-app
   namespace: default
 spec:
-  cueRef:
-    type: Embedded
-    ref: webservice
-  input:
-    image: nginx:1.25-alpine
-    port: 80
-    replicas: 3  # Changed from 2 to 3
+  image: nginx:1.25-alpine
+  port: 80
+  replicas: 3  # Changed from 2 to 3
 ```
 
 Apply the change:
@@ -209,7 +252,7 @@ kubectl apply -f my-first-app.yaml
 Watch the update:
 
 ```bash
-kubectl get pods -l app.kubernetes.io/name=my-first-app -w
+kubectl get pods -l app.kubernetes.io/instance=my-first-app -w
 ```
 
 You'll see a new pod being created:
@@ -223,40 +266,24 @@ my-first-app-xxxxxxxxx-zzzzz    1/1     Running   0          5s
 
 Press `Ctrl+C` to stop watching.
 
-## Step 8: View Status and Debug
+## Step 10: View Status and Debug
 
-### Transform Status
+### WebService Instance Status
 
-Get detailed Transform status:
+Get detailed instance status:
 
 ```bash
-kubectl get transform my-first-app -o yaml
+kubectl get webservice my-first-app -o yaml
 ```
 
-Key status fields:
-```yaml
-status:
-  phase: Rendered
-  observedGeneration: 2
-  resourceGraphRef:
-    name: my-first-app-abc123xyz
-    namespace: default
-  resolvedCueRef:
-    digest: embedded:webservice
-    fetchedAt: "2024-01-01T00:00:00Z"
-  conditions:
-  - type: Ready
-    status: "True"
-    reason: Reconciled
-    message: Successfully reconciled
-```
+Key status fields will show phase, conditions, and resource references.
 
 ### ResourceGraph Status
 
 Check the node execution states:
 
 ```bash
-kubectl get resourcegraph -l pequod.io/transform=my-first-app \
+kubectl get resourcegraph -l pequod.io/instance=my-first-app \
   -o jsonpath='{.items[0].status.nodeStates}' | jq .
 ```
 
@@ -286,41 +313,41 @@ View the controller logs for debugging:
 kubectl logs -n pequod-system -l control-plane=controller-manager --tail=50
 ```
 
-## Step 9: Pause Reconciliation (Optional)
+## Step 11: Pause Reconciliation (Optional)
 
 You can pause reconciliation to make manual changes:
 
 ```bash
-kubectl label transform my-first-app pequod.io/paused=true
+kubectl label webservice my-first-app pequod.io/paused=true
 ```
 
 Verify it's paused:
 ```bash
-kubectl get transform my-first-app -o jsonpath='{.metadata.labels}'
+kubectl get webservice my-first-app -o jsonpath='{.metadata.labels}'
 ```
 
 Resume reconciliation:
 ```bash
-kubectl label transform my-first-app pequod.io/paused-
+kubectl label webservice my-first-app pequod.io/paused-
 ```
 
-## Step 10: Delete the Application
+## Step 12: Delete the Application
 
-Clean up by deleting the Transform:
+Clean up by deleting the WebService instance:
 
 ```bash
-kubectl delete transform my-first-app
+kubectl delete webservice my-first-app
 ```
 
 Verify everything is deleted:
 
 ```bash
-# Transform should be gone
-kubectl get transform my-first-app
+# Instance should be gone
+kubectl get webservice my-first-app
 # Expected: Error from server (NotFound)
 
 # ResourceGraph should be gone
-kubectl get resourcegraph -l pequod.io/transform=my-first-app
+kubectl get resourcegraph -l pequod.io/instance=my-first-app
 # Expected: No resources found
 
 # Resources should be gone
@@ -328,7 +355,14 @@ kubectl get deployment,service my-first-app
 # Expected: Error from server (NotFound)
 ```
 
-## Step 11: Clean Up
+(Optional) Delete the Transform and generated CRD:
+
+```bash
+kubectl delete transform webservice
+# This will also delete the WebService CRD
+```
+
+## Step 13: Clean Up
 
 Remove Pequod from your cluster:
 
@@ -348,66 +382,25 @@ kind delete cluster --name pequod-tutorial
 Congratulations! You've successfully:
 
 1. Installed Pequod
-2. Created a Transform
-3. Observed the rendered ResourceGraph
-4. Updated the application
-5. Viewed status and debugged
-6. Cleaned up
+2. Created a Transform (platform engineer role) that generated a WebService CRD
+3. Created a WebService instance (developer role)
+4. Observed the rendered ResourceGraph
+5. Updated the application
+6. Viewed status and debugged
+7. Cleaned up
 
 ### Learn More
 
-- [User Guide](user-guide.md) - Complete API reference and examples
+- [User Guide](user-guide.md) - Complete API reference and examples for developers
 - [Platform Engineer Guide](platform-engineer-guide.md) - Create custom platform modules
 - [Operations Guide](operations.md) - Production deployment and monitoring
 
-### Try More Examples
+### Key Takeaways
 
-Create a Transform with inline CUE:
-
-```yaml
-apiVersion: platform.platform.example.com/v1alpha1
-kind: Transform
-metadata:
-  name: inline-example
-spec:
-  cueRef:
-    type: inline
-    ref: |
-      #Render: {
-        input: {
-          metadata: { name: string, namespace: string }
-          spec: { message: string }
-        }
-        output: {
-          metadata: { name: input.metadata.name, version: "v1" }
-          nodes: [{
-            id: "configmap"
-            object: {
-              apiVersion: "v1"
-              kind: "ConfigMap"
-              metadata: {
-                name: input.metadata.name
-                namespace: input.metadata.namespace
-              }
-              data: { message: input.spec.message }
-            }
-            applyPolicy: { mode: "Apply" }
-            dependsOn: []
-            readyWhen: [{ type: "Exists" }]
-          }]
-          violations: []
-        }
-      }
-  input:
-    message: "Hello from Pequod!"
-```
-
-Apply and verify:
-
-```bash
-kubectl apply -f inline-example.yaml
-kubectl get configmap inline-example -o yaml
-```
+- **Platform Engineers** create `Transform` resources that generate CRDs
+- **Developers** create instances of generated CRDs (e.g., `WebService`)
+- Pequod handles CUE evaluation, resource rendering, and DAG execution
+- Each platform instance creates a `ResourceGraph` that tracks managed resources
 
 ## Troubleshooting This Tutorial
 
@@ -421,11 +414,21 @@ kubectl get pods -n pequod-system
 kubectl describe deployment -n pequod-system pequod-controller-manager
 ```
 
+### CRD not generated
+
+```bash
+# Check Transform status
+kubectl get transform webservice -o yaml
+
+# Look at conditions for errors
+kubectl describe transform webservice
+```
+
 ### Resources not created
 
 ```bash
 # Check ResourceGraph status
-kubectl get resourcegraph -l pequod.io/transform=my-first-app -o yaml
+kubectl get resourcegraph -l pequod.io/instance=my-first-app -o yaml
 
 # Check for node errors in nodeStates
 ```
