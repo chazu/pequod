@@ -571,4 +571,3 @@ func TestTransformHandlers_ConcurrentReconciliation_DifferentResources(t *testin
 		t.Errorf("expected %d CRDs, got %d", len(transforms), len(crdList.Items))
 	}
 }
-
