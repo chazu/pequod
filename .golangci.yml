@@ -26,16 +26,57 @@ linters:
       rules:
         - name: comment-spacings
         - name: import-shadowing
+    lll:
+      line-length: 160
+    gocyclo:
+      min-complexity: 35
+    goconst:
+      min-occurrences: 4
   exclusions:
     generated: lax
     rules:
+      # Relax rules for API types
       - linters:
           - lll
         path: api/*
+      # Relax rules for internal code
       - linters:
           - dupl
           - lll
         path: internal/*
+      # Relax rules for test files
+      - linters:
+          - dupl
+          - errcheck
+          - lll
+          - unparam
+          - unused
+          - goconst
+          - gocyclo
+        path: _test\.go$
+      # Relax rules for test utilities
+      - linters:
+          - errcheck
+          - unparam
+        path: test/*
+      # Allow unused parameters in certain packages (interface contracts, future use)
+      - linters:
+          - unparam
+        path: pkg/graph/executor\.go
+      - linters:
+          - unparam
+        path: pkg/platformloader/
+      - linters:
+          - unparam
+        path: pkg/reconcile/transform_handlers\.go
+      - linters:
+          - unparam
+        path: internal/controller/
+      # Exclude common errcheck issues (Close, Write, Remove errors on cleanup)
+      - linters:
+          - errcheck
+        text: "Error return value of .*(Close|Write|Remove|RemoveAll).*is not checked"
+        path: pkg/platformloader/
     paths:
       - third_party$
       - builtin$

@@ -49,10 +49,10 @@ type DiskCache struct {
 
 // CacheEntry represents a cached module
 type CacheEntry struct {
-	Key       string    `json:"key"`
-	Digest    string    `json:"digest"`
-	Size      int64     `json:"size"`
-	CreatedAt time.Time `json:"createdAt"`
+	Key        string    `json:"key"`
+	Digest     string    `json:"digest"`
+	Size       int64     `json:"size"`
+	CreatedAt  time.Time `json:"createdAt"`
 	AccessedAt time.Time `json:"accessedAt"`
 }
 

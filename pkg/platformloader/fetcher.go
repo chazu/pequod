@@ -55,7 +55,7 @@ func NewFetcherRegistry(k8sClient client.Client, cacheDir string) *FetcherRegist
 	registry.fetchers["oci"] = NewOCIFetcher(diskCache)
 	registry.fetchers["git"] = NewGitFetcher(diskCache)
 	registry.fetchers["configmap"] = NewConfigMapFetcher(k8sClient)
-	registry.fetchers["inline"] = NewInlineFetcher()
+	registry.fetchers[InlineType] = NewInlineFetcher()
 	registry.fetchers["embedded"] = NewEmbeddedFetcher()
 
 	return registry

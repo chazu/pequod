@@ -38,13 +38,13 @@ type TransformHandlers struct {
 
 // NewTransformHandlers creates a new handler collection for Transform
 func NewTransformHandlers(
-	client client.Client,
+	k8sClient client.Client,
 	scheme *runtime.Scheme,
 	recorder record.EventRecorder,
 	renderer *platformloader.Renderer,
 ) *TransformHandlers {
 	return &TransformHandlers{
-		client:   client,
+		client:   k8sClient,
 		scheme:   scheme,
 		recorder: recorder,
 		renderer: renderer,
@@ -185,9 +185,10 @@ func (h *TransformHandlers) renderGraph(ctx context.Context, tf *platformv1alpha
 		errorCount := 0
 		warningCount := 0
 		for _, v := range g.Violations {
-			if v.Severity == graph.ViolationSeverityError {
+			switch v.Severity {
+			case graph.ViolationSeverityError:
 				errorCount++
-			} else if v.Severity == graph.ViolationSeverityWarning {
+			case graph.ViolationSeverityWarning:
 				warningCount++
 			}
 		}
@@ -227,7 +228,9 @@ const (
 )
 
 // createOrUpdateResourceGraph creates or updates a ResourceGraph CR from the rendered graph
-func (h *TransformHandlers) createOrUpdateResourceGraph(ctx context.Context, tf *platformv1alpha1.Transform, g *graph.Graph) (*platformv1alpha1.ResourceGraph, error) {
+func (h *TransformHandlers) createOrUpdateResourceGraph(
+	ctx context.Context, tf *platformv1alpha1.Transform, g *graph.Graph,
+) (*platformv1alpha1.ResourceGraph, error) {
 	logger := log.FromContext(ctx)
 
 	// Check node count and emit warnings
@@ -345,7 +348,10 @@ func (h *TransformHandlers) cleanupOldResourceGraphs(ctx context.Context, tf *pl
 }
 
 // updateStatus updates the Transform status with ResourceGraph reference
-func (h *TransformHandlers) updateStatus(ctx context.Context, tf *platformv1alpha1.Transform, rg *platformv1alpha1.ResourceGraph, fetchResult *platformloader.FetchResult) (ctrl.Result, error) {
+func (h *TransformHandlers) updateStatus(
+	ctx context.Context, tf *platformv1alpha1.Transform,
+	rg *platformv1alpha1.ResourceGraph, fetchResult *platformloader.FetchResult,
+) (ctrl.Result, error) {
 	// Update ResourceGraph reference
 	tf.Status.ResourceGraphRef = &platformv1alpha1.ObjectReference{
 		APIVersion: rg.APIVersion,

@@ -973,7 +973,6 @@ func TestTransformHandlers_ConcurrentReconciliation_DifferentResources(t *testin
 	errChan := make(chan error, len(transforms))
 
 	for _, tf := range transforms {
-		tf := tf // capture loop variable
 		go func() {
 			_, err := handlers.Reconcile(context.Background(), types.NamespacedName{
 				Name:      tf.Name,

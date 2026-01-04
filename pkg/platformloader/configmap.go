@@ -121,7 +121,7 @@ func extractCUEFromConfigMap(cm *corev1.ConfigMap) ([]byte, error) {
 
 	// Fall back to concatenating all data
 	// This allows simple ConfigMaps with a single key containing CUE
-	var keys []string
+	keys := make([]string, 0, len(cm.Data))
 	for key := range cm.Data {
 		keys = append(keys, key)
 	}

@@ -19,13 +19,13 @@ type TransformReconciler struct {
 
 // NewTransformReconciler creates a new handler-based reconciler for Transform
 func NewTransformReconciler(
-	client client.Client,
+	k8sClient client.Client,
 	scheme *runtime.Scheme,
 	renderer *platformloader.Renderer,
 ) *TransformReconciler {
 	// Create handlers
 	handlers := NewTransformHandlers(
-		client,
+		k8sClient,
 		scheme,
 		nil, // recorder will be set by controller
 		renderer,

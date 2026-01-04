@@ -136,7 +136,7 @@ func (pv *PolicyValidator) ValidateOutput(ctx context.Context, g *graph.Graph) (
 	// Validate that all nodes have proper labels
 	for i, node := range g.Nodes {
 		labels := node.Object.GetLabels()
-		if labels == nil || len(labels) == 0 {
+		if len(labels) == 0 {
 			violations = append(violations, graph.Violation{
 				Path:     fmt.Sprintf("graph.nodes[%d].object.metadata.labels", i),
 				Message:  "resource should have labels",

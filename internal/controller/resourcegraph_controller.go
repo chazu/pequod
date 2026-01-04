@@ -146,7 +146,7 @@ func (r *ResourceGraphReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	ctrlResult, err := r.executeGraph(ctx, rg)
 	if err != nil {
 		result = "error"
-	} else if ctrlResult.Requeue || ctrlResult.RequeueAfter > 0 {
+	} else if ctrlResult.RequeueAfter > 0 {
 		result = "requeue"
 	} else {
 		result = "success"

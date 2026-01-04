@@ -8,6 +8,11 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
+const (
+	// InlineType is the type identifier for inline CUE content
+	InlineType = "inline"
+)
+
 // InlineFetcher handles inline CUE content embedded directly in the Transform spec
 type InlineFetcher struct{}
 
@@ -18,7 +23,7 @@ func NewInlineFetcher() *InlineFetcher {
 
 // Type returns the fetcher type
 func (f *InlineFetcher) Type() string {
-	return "inline"
+	return InlineType
 }
 
 // Fetch returns the inline CUE content directly
@@ -32,11 +37,11 @@ func (f *InlineFetcher) Fetch(ctx context.Context, ref string, _ *corev1.Secret)
 	content := []byte(ref)
 
 	// Compute a content-based digest
-	digest := fmt.Sprintf("inline:%x", xxhash.Sum64(content))
+	digest := fmt.Sprintf("%s:%x", InlineType, xxhash.Sum64(content))
 
 	return &FetchResult{
 		Content: content,
 		Digest:  digest,
-		Source:  "inline",
+		Source:  InlineType,
 	}, nil
 }

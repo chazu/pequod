@@ -36,7 +36,9 @@ type CueRefInput struct {
 
 // RenderTransformWithCueRef renders a Transform using a CueRef specification
 // This is the preferred method for rendering Transforms as it supports all fetcher types
-func (r *Renderer) RenderTransformWithCueRef(ctx context.Context, name, namespace string, rawInput runtime.RawExtension, cueRef CueRefInput) (*graph.Graph, *FetchResult, error) {
+func (r *Renderer) RenderTransformWithCueRef(
+	ctx context.Context, name, namespace string, rawInput runtime.RawExtension, cueRef CueRefInput,
+) (*graph.Graph, *FetchResult, error) {
 	var cueValue cue.Value
 	var fetchResult *FetchResult
 	var err error
@@ -53,7 +55,7 @@ func (r *Renderer) RenderTransformWithCueRef(ctx context.Context, name, namespac
 			Source: fmt.Sprintf("embedded://%s", cueRef.Ref),
 		}
 
-	case "inline":
+	case InlineType:
 		// Compile inline CUE directly
 		cueValue = r.loader.ctx.CompileString(cueRef.Ref)
 		if cueValue.Err() != nil {
@@ -61,8 +63,8 @@ func (r *Renderer) RenderTransformWithCueRef(ctx context.Context, name, namespac
 		}
 		fetchResult = &FetchResult{
 			Content: []byte(cueRef.Ref),
-			Digest:  "inline",
-			Source:  "inline",
+			Digest:  InlineType,
+			Source:  InlineType,
 		}
 
 	case "oci", "git", "configmap":
@@ -108,7 +110,10 @@ func (r *Renderer) RenderTransform(ctx context.Context, name, namespace string, 
 }
 
 // renderWithCueValue renders a Transform using a pre-loaded CUE value
-func (r *Renderer) renderWithCueValue(ctx context.Context, name, namespace string, rawInput runtime.RawExtension, cueValue cue.Value, platformRef string) (*graph.Graph, error) {
+func (r *Renderer) renderWithCueValue(
+	ctx context.Context, name, namespace string, rawInput runtime.RawExtension,
+	cueValue cue.Value, platformRef string,
+) (*graph.Graph, error) {
 
 	// Parse the raw input using json.Decoder with UseNumber() to preserve integer types
 	// Standard json.Unmarshal converts all numbers to float64, which causes CUE type errors

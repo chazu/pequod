@@ -370,8 +370,8 @@ func TestAdoptionReport_Counts(t *testing.T) {
 		TotalFailed:  0,
 	}
 
-	if !report.HasErrors() {
-		// No failures means no errors
+	if report.HasErrors() {
+		t.Error("expected no errors in report")
 	}
 	if report.TotalAdopted != 2 {
 		t.Errorf("expected TotalAdopted=2, got %d", report.TotalAdopted)

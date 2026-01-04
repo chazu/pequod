@@ -61,12 +61,12 @@ type Executor struct {
 }
 
 // NewExecutor creates a new DAG executor
-func NewExecutor(applier Applier, readinessChecker ReadinessChecker, client client.Client, config ExecutorConfig) *Executor {
+func NewExecutor(applier Applier, readinessChecker ReadinessChecker, k8sClient client.Client, config ExecutorConfig) *Executor {
 	return &Executor{
 		config:           config,
 		applier:          applier,
 		readinessChecker: readinessChecker,
-		client:           client,
+		client:           k8sClient,
 	}
 }
 
@@ -77,10 +77,7 @@ func (e *Executor) Execute(ctx context.Context, dag *DAG) (*ExecutionState, erro
 	}
 
 	// Initialize execution state
-	nodeIDs := make([]string, 0, dag.Size())
-	for _, id := range dag.GetOrder() {
-		nodeIDs = append(nodeIDs, id)
-	}
+	nodeIDs := dag.GetOrder()
 	state := NewExecutionState(nodeIDs)
 
 	// Execute nodes in waves based on dependencies
@@ -157,8 +154,6 @@ func (e *Executor) executeNodes(ctx context.Context, dag *DAG, state *ExecutionS
 	p := pool.New().WithMaxGoroutines(e.config.MaxConcurrency).WithErrors()
 
 	for _, nodeID := range nodeIDs {
-		nodeID := nodeID // Capture for goroutine
-
 		p.Go(func() error {
 			return e.executeNode(ctx, dag, state, nodeID)
 		})
@@ -195,19 +190,19 @@ func (e *Executor) executeNode(ctx context.Context, dag *DAG, state *ExecutionSt
 		case <-time.After(delay):
 		}
 
-		// Increment retry count
-		state.IncrementRetry(nodeID)
+		// Increment retry count (error ignored: retry proceeds regardless)
+		_ = state.IncrementRetry(nodeID)
 	}
 
 	// Transition to Applying state
 	if err := state.SetState(nodeID, NodeStateApplying); err != nil {
-		state.SetError(nodeID, err)
+		_ = state.SetError(nodeID, err)
 		return err
 	}
 
 	// Apply the resource with its policy
 	if err := e.applier.Apply(ctx, &node.Object, node.ApplyPolicy); err != nil {
-		state.SetError(nodeID, fmt.Errorf("failed to apply: %w", err))
+		_ = state.SetError(nodeID, fmt.Errorf("failed to apply: %w", err))
 		return err
 	}
 
@@ -215,7 +210,7 @@ func (e *Executor) executeNode(ctx context.Context, dag *DAG, state *ExecutionSt
 	if len(node.ReadyWhen) == 0 {
 		// No readiness predicates - mark as ready immediately
 		if err := state.SetState(nodeID, NodeStateReady); err != nil {
-			state.SetError(nodeID, err)
+			_ = state.SetError(nodeID, err)
 			return err
 		}
 		return nil
@@ -223,19 +218,19 @@ func (e *Executor) executeNode(ctx context.Context, dag *DAG, state *ExecutionSt
 
 	// Transition to WaitingReady state
 	if err := state.SetState(nodeID, NodeStateWaitingReady); err != nil {
-		state.SetError(nodeID, err)
+		_ = state.SetError(nodeID, err)
 		return err
 	}
 
 	// Wait for readiness
 	if err := e.waitForReadiness(ctx, node, state, nodeID); err != nil {
-		state.SetError(nodeID, fmt.Errorf("readiness check failed: %w", err))
+		_ = state.SetError(nodeID, fmt.Errorf("readiness check failed: %w", err))
 		return err
 	}
 
 	// Mark as ready
 	if err := state.SetState(nodeID, NodeStateReady); err != nil {
-		state.SetError(nodeID, err)
+		_ = state.SetError(nodeID, err)
 		return err
 	}
 
