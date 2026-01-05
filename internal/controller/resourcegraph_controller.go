@@ -208,8 +208,8 @@ func (r *ResourceGraphReconciler) executeGraph(ctx context.Context, rg *platform
 	// Record execution start event
 	r.recordEvent(rg, "Normal", "ExecutionStarted", fmt.Sprintf("Starting execution of %d nodes", len(internalGraph.Nodes)))
 
-	// Record DAG node count metric
-	SetDAGNodes(rg.Name, len(internalGraph.Nodes))
+	// Record DAG node count metric (using namespace for bounded cardinality)
+	SetDAGNodes(rg.Namespace, len(internalGraph.Nodes))
 
 	// Execute the DAG with timing
 	dagStartTime := time.Now()
@@ -220,13 +220,13 @@ func (r *ResourceGraphReconciler) executeGraph(ctx context.Context, rg *platform
 	if err != nil {
 		logger.Error(err, "DAG execution failed")
 		r.recordEvent(rg, "Warning", "ExecutionFailed", fmt.Sprintf("DAG execution failed: %v", err))
-		RecordDAGExecution(rg.Name, "failed", dagDuration)
+		RecordDAGExecution(rg.Namespace, "failed", dagDuration)
 		return r.updateStatusFromExecution(ctx, rg, executionState, false)
 	}
 
 	// Record success event and metrics
 	r.recordEvent(rg, "Normal", "ExecutionCompleted", fmt.Sprintf("Successfully applied %d resources", len(internalGraph.Nodes)))
-	RecordDAGExecution(rg.Name, "success", dagDuration)
+	RecordDAGExecution(rg.Namespace, "success", dagDuration)
 
 	// Update status from execution state
 	return r.updateStatusFromExecution(ctx, rg, executionState, true)

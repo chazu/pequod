@@ -11,25 +11,17 @@ The Pequod operator is a platform engineering tool that dynamically generates CR
 
 ## 1. Technical Debt
 
-### 1.1 TODO Comments and Incomplete Implementations
+### 1.1 ~~TODO Comments and Incomplete Implementations~~ ✅ ADDRESSED (Embedded CUE Loader)
 
-**File: `pkg/platformloader/loader.go:105-106`**
-```go
-// TODO: In production, this should use go:embed with proper paths
-func (l *Loader) LoadEmbedded(version string) (cue.Value, error) {
-```
-**Issue:** The embedded CUE module loader uses relative path detection (`findCuePlatformPath`) instead of Go's `embed` package, which is brittle and will fail in containerized deployments.
+**Status:** Proper `go:embed` implementation is now in place.
 
-**File: `pkg/platformloader/loader.go:134-150`**
-```go
-func (l *Loader) findCuePlatformPath() (string, error) {
-    // Try current directory first
-    if _, err := os.Stat("cue/platform"); err == nil {
-        return "cue/platform", nil
-    }
-    // Try going up one level...
-```
-**Issue:** This approach is non-deterministic and environment-dependent. The Docker image may not have these paths available.
+**Solution implemented:**
+- `cue/embed.go` defines `PlatformFS` with `//go:embed platform/*/*.cue platform/policy/*.cue`
+- `pkg/platformloader/embedded.go` provides `EmbeddedFetcher` using the `fs.FS` interface
+- `cmd/main.go` configures the loader with `cuembed.PlatformFS` and `cuembed.PlatformDir`
+- The old `findCuePlatformPath` and `LoadEmbedded` methods have been removed
+
+This approach is deterministic and works correctly in containerized deployments.
 
 **File: `config/manager/manager.yaml:87-88`**
 ```yaml
@@ -65,33 +57,17 @@ case platformv1alpha1.AdoptStrategyMirror:
 
 ## 2. Kubernetes Operator Best Practices Issues
 
-### 2.1 RBAC Configuration - Overly Permissive (CRITICAL)
+### 2.1 RBAC Configuration - ~~Overly Permissive~~ ✅ ADDRESSED
 
-**File: `config/rbac/role.yaml:14-28`**
-```yaml
-- apiGroups:
-  - ""
-  - '*'
-  - apps
-  - batch
-  resources:
-  - '*'
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-```
-**CRITICAL:** The RBAC role grants `*` verbs on `*` resources across all API groups. This is a major security vulnerability. The operator should request only the specific resources it manages.
+**Status:** Dynamic RBAC management has been implemented. See `docs/rbac.md` for details.
 
-**File: `internal/controller/platforminstance_controller.go:63`**
-```go
-// +kubebuilder:rbac:groups=*,resources=*,verbs=get;list;watch;create;update;patch;delete
-```
-**Issue:** The RBAC markers also request wildcard permissions.
+**Solution implemented:**
+- Transforms now declare `managedResources` specifying which K8s resources they manage
+- `pkg/rbac/generator.go` generates scoped ClusterRoles/Roles based on these declarations
+- ClusterRole aggregation (`config/rbac/aggregate_role.yaml`) automatically combines per-Transform roles
+- Supports both `Cluster` and `Namespace` scope for least-privilege configurations
+
+**Remaining cleanup:** The base `config/rbac/role.yaml` still contains wildcard permissions (lines 14-28) that should be removed once all Transforms are migrated to use `managedResources`. The wildcard RBAC marker in `internal/controller/platforminstance_controller.go:63` should also be removed.
 
 ### 2.2 Status Updates Without Retry-On-Conflict Pattern
 
@@ -378,23 +354,16 @@ Validation exists but only executes during reconciliation, not at admission time
 
 No PDB defined in `config/` which could cause unavailability during cluster upgrades.
 
-### 5.4 Metrics Cardinality Risk
+### 5.4 ~~Metrics Cardinality Risk~~ ✅ ADDRESSED
 
-**File: `internal/controller/metrics.go:43-52`**
-```go
-dagNodesTotal = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-    Name: "pequod_dag_nodes_total",
-}, []string{"resourcegraph"})
+**Status:** High-cardinality labels have been replaced with bounded alternatives.
 
-dagExecutionDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
-    Name:    "pequod_dag_execution_duration_seconds",
-}, []string{"resourcegraph", "result"})
+**Solution implemented:**
+- `dagNodesTotal` now uses `namespace` label instead of `resourcegraph` name
+- `dagExecutionDuration` now uses `namespace` label instead of `resourcegraph` name
+- `dagNodeExecutionDuration` now uses only `result` label (removed high-cardinality `node_id`)
 
-dagNodeExecutionDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
-    Name:    "pequod_dag_node_execution_duration_seconds",
-}, []string{"node_id", "result"})
-```
-**Issue:** Using `resourcegraph` name and especially `node_id` as labels will create unbounded cardinality. With many ResourceGraphs and nodes, this will blow up Prometheus memory.
+Namespaces provide bounded cardinality since clusters typically have a limited number of namespaces, whereas ResourceGraph names and node IDs are unbounded.
 
 ### 5.5 No Context Timeout on CUE Evaluation
 
@@ -436,9 +405,9 @@ While `config/network-policy/` exists with metrics access, there's no policy res
 
 ## 6. Security Concerns
 
-### 6.1 Wildcard RBAC (CRITICAL)
+### 6.1 ~~Wildcard RBAC~~ ✅ ADDRESSED
 
-As noted in section 2.1, the RBAC configuration grants full cluster access.
+Dynamic RBAC management has been implemented (see section 2.1). Minor cleanup remains to remove legacy wildcard permissions from base role.yaml.
 
 ### 6.2 CUE Code Execution Risk
 
@@ -477,17 +446,17 @@ Platform names directly become CRD names without validation. Malicious names cou
 
 ## 7. Summary of Critical Issues
 
-| Priority | Issue | Location |
-|----------|-------|----------|
-| **CRITICAL** | RBAC Wildcard Permissions | `config/rbac/role.yaml` |
-| **HIGH** | Embedded Loader Path Detection | `pkg/platformloader/loader.go` |
-| **HIGH** | Metrics Cardinality | `internal/controller/metrics.go` |
-| **HIGH** | Status Update Race Conditions | Multiple skipped tests confirm |
-| **MEDIUM** | Inefficient GVK Lookup | `internal/controller/platforminstance_controller.go` |
-| **MEDIUM** | Memory Limits | `config/manager/manager.yaml` |
-| **MEDIUM** | Missing PlatformInstanceReconciler Tests | `internal/controller/suite_test.go` |
-| **MEDIUM** | Polling Watch Discovery | `internal/controller/platforminstance_controller.go` |
-| **LOW** | Inconsistent API Groups | Multiple files |
+| Priority | Issue | Location | Status |
+|----------|-------|----------|--------|
+| ~~**CRITICAL**~~ | ~~RBAC Wildcard Permissions~~ | `config/rbac/role.yaml` | ✅ Addressed (minor cleanup remains) |
+| ~~**HIGH**~~ | ~~Embedded Loader Path Detection~~ | `pkg/platformloader/loader.go` | ✅ Addressed via go:embed |
+| ~~**HIGH**~~ | ~~Metrics Cardinality~~ | `internal/controller/metrics.go` | ✅ Addressed - bounded labels |
+| **HIGH** | Status Update Race Conditions | Multiple skipped tests confirm | Open |
+| **MEDIUM** | Inefficient GVK Lookup | `internal/controller/platforminstance_controller.go` | Open |
+| **MEDIUM** | Memory Limits | `config/manager/manager.yaml` | Open |
+| **MEDIUM** | Missing PlatformInstanceReconciler Tests | `internal/controller/suite_test.go` | Open |
+| **MEDIUM** | Polling Watch Discovery | `internal/controller/platforminstance_controller.go` | Open |
+| **LOW** | Inconsistent API Groups | Multiple files | Open |
 
 ---
 
@@ -495,10 +464,11 @@ Platform names directly become CRD names without validation. Malicious names cou
 
 ### Immediate (Before Production)
 
-1. **Fix RBAC** to request only specific resources the operator needs to manage
-2. **Implement go:embed** for CUE modules instead of path detection
+1. ~~**Fix RBAC** to request only specific resources the operator needs to manage~~ ✅ Done - dynamic RBAC via `managedResources`
+2. ~~**Implement go:embed** for CUE modules instead of path detection~~ ✅ Done - see `cue/embed.go` and `pkg/platformloader/embedded.go`
 3. **Increase memory limits** to at least 512Mi
-4. **Fix metrics labels** to avoid unbounded cardinality (use hashed identifiers or remove high-cardinality labels)
+4. ~~**Fix metrics labels** to avoid unbounded cardinality~~ ✅ Done - replaced with `namespace` and `result` labels
+5. **Remove legacy wildcard permissions** from `config/rbac/role.yaml` (lines 14-28) and RBAC markers
 
 ### Short-term
 

@@ -40,22 +40,24 @@ var (
 	}, []string{"controller", "error_type"})
 
 	// DAG execution metrics
+	// Note: We intentionally avoid high-cardinality labels like resourcegraph names
+	// or node IDs to prevent Prometheus memory issues at scale.
 	dagNodesTotal = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "pequod_dag_nodes_total",
 		Help: "Total number of nodes in DAG being executed",
-	}, []string{"resourcegraph"})
+	}, []string{"namespace"})
 
 	dagExecutionDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "pequod_dag_execution_duration_seconds",
 		Help:    "Duration of DAG executions",
 		Buckets: prometheus.ExponentialBuckets(0.1, 2, 10), // 100ms to ~100s
-	}, []string{"resourcegraph", "result"})
+	}, []string{"namespace", "result"})
 
 	dagNodeExecutionDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "pequod_dag_node_execution_duration_seconds",
 		Help:    "Duration of individual node executions",
 		Buckets: prometheus.ExponentialBuckets(0.01, 2, 10), // 10ms to ~10s
-	}, []string{"node_id", "result"})
+	}, []string{"result"})
 
 	// Adoption metrics
 	adoptionTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -96,18 +98,21 @@ func RecordReconcileError(controller, errorType string) {
 }
 
 // SetDAGNodes sets the current number of nodes in a DAG
-func SetDAGNodes(resourceGraph string, count int) {
-	dagNodesTotal.WithLabelValues(resourceGraph).Set(float64(count))
+// Uses namespace label for bounded cardinality instead of resourcegraph name
+func SetDAGNodes(namespace string, count int) {
+	dagNodesTotal.WithLabelValues(namespace).Set(float64(count))
 }
 
 // RecordDAGExecution records a DAG execution
-func RecordDAGExecution(resourceGraph, result string, durationSeconds float64) {
-	dagExecutionDuration.WithLabelValues(resourceGraph, result).Observe(durationSeconds)
+// Uses namespace label for bounded cardinality instead of resourcegraph name
+func RecordDAGExecution(namespace, result string, durationSeconds float64) {
+	dagExecutionDuration.WithLabelValues(namespace, result).Observe(durationSeconds)
 }
 
 // RecordNodeExecution records a node execution
-func RecordNodeExecution(nodeID, result string, durationSeconds float64) {
-	dagNodeExecutionDuration.WithLabelValues(nodeID, result).Observe(durationSeconds)
+// Uses only result label for bounded cardinality (removed high-cardinality node_id)
+func RecordNodeExecution(result string, durationSeconds float64) {
+	dagNodeExecutionDuration.WithLabelValues(result).Observe(durationSeconds)
 }
 
 // RecordAdoption records an adoption operation
