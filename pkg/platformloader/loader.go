@@ -153,10 +153,22 @@ func (l *Loader) findCuePlatformPath() (string, error) {
 // LoadFromPath loads a CUE module from a filesystem path
 // This is useful for development and testing
 func (l *Loader) LoadFromPath(path string) (cue.Value, error) {
-	// Use CUE's load package to load from filesystem
-	buildInstances := load.Instances([]string{path}, nil)
+	// Convert to absolute path to avoid CUE treating it as an import path
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return cue.Value{}, fmt.Errorf("failed to get absolute path for %s: %w", path, err)
+	}
+
+	// Configure the loader with the directory as the working directory
+	// and use "." as the package to load
+	cfg := &load.Config{
+		Dir: absPath,
+	}
+
+	// Use "." to load the package in the current directory
+	buildInstances := load.Instances([]string{"."}, cfg)
 	if len(buildInstances) == 0 {
-		return cue.Value{}, fmt.Errorf("no CUE instances found at %s", path)
+		return cue.Value{}, fmt.Errorf("no CUE instances found at %s", absPath)
 	}
 
 	inst := buildInstances[0]

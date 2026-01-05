@@ -275,6 +275,10 @@ func (e *Extractor) extractStructSchema(v cue.Value, schema *apiextensionsv1.JSO
 		fieldName := iter.Selector().String()
 		fieldValue := iter.Value()
 
+		// Strip the optional marker '?' suffix from field names
+		// CUE's Selector().String() includes this for optional fields
+		fieldName = strings.TrimSuffix(fieldName, "?")
+
 		// Skip hidden fields (starting with _)
 		if strings.HasPrefix(fieldName, "_") {
 			continue

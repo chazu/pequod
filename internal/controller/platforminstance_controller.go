@@ -130,11 +130,20 @@ func (r *PlatformInstanceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		r.Renderer,
 	)
 
-	// Build the controller
+	// Build the controller with an initial watch on Transforms
+	// This satisfies controller-runtime's requirement for at least one watch,
+	// and allows us to react when new CRDs are generated
 	c, err := ctrl.NewControllerManagedBy(mgr).
 		Named("platforminstance").
-		// We don't use For() since we watch dynamic types
-		// Instead, we'll add watches dynamically
+		// Watch Transforms to trigger discovery when CRDs are generated
+		Watches(
+			&platformv1alpha1.Transform{},
+			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []ctrl.Request {
+				// When a Transform changes, we trigger discovery but don't reconcile anything specific
+				// The discovery loop will handle adding new watches
+				return nil
+			}),
+		).
 		Build(r)
 	if err != nil {
 		return err
