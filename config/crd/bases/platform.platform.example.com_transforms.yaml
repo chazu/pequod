@@ -107,10 +107,10 @@ spec:
                 - type
                 type: object
               group:
-                default: platform.pequod.io
+                default: pequod.io
                 description: |-
                   Group is the API group for the generated CRD
-                  Defaults to "platform.pequod.io"
+                  Defaults to "pequod.io"
                 type: string
               managedResources:
                 description: |-

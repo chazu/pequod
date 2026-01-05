@@ -112,7 +112,7 @@ var _ = Describe("ResourceGraph Controller", Ordered, func() {
 				},
 				Spec: platformv1alpha1.ResourceGraphSpec{
 					SourceRef: platformv1alpha1.ObjectReference{
-						APIVersion: "platform.pequod.io/v1alpha1",
+						APIVersion: "pequod.io/v1alpha1",
 						Kind:       "Transform",
 						Name:       "test-transform",
 						Namespace:  namespace,
@@ -248,7 +248,7 @@ var _ = Describe("ResourceGraph Controller", Ordered, func() {
 				},
 				Spec: platformv1alpha1.ResourceGraphSpec{
 					SourceRef: platformv1alpha1.ObjectReference{
-						APIVersion: "platform.pequod.io/v1alpha1",
+						APIVersion: "pequod.io/v1alpha1",
 						Kind:       "Transform",
 						Name:       "test-transform-multi",
 						Namespace:  namespace,

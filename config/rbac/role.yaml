@@ -39,7 +39,7 @@ rules:
   - update
   - watch
 - apiGroups:
-  - platform.pequod.io
+  - pequod.io
   resources:
   - resourcegraphs
   verbs:
@@ -51,7 +51,7 @@ rules:
   - update
   - watch
 - apiGroups:
-  - platform.pequod.io
+  - pequod.io
   resources:
   - resourcegraphs/status
   verbs:
@@ -59,7 +59,7 @@ rules:
   - patch
   - update
 - apiGroups:
-  - platform.pequod.io
+  - pequod.io
   resources:
   - transforms
   verbs:

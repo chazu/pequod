@@ -12,6 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -26,10 +27,10 @@ import (
 
 const (
 	// PausedAnnotation is the annotation key to pause reconciliation
-	PausedAnnotation = "platform.pequod.io/paused"
+	PausedAnnotation = "pequod.io/paused"
 
 	// TransformFinalizer is the finalizer added to Transform resources
-	TransformFinalizer = "platform.pequod.io/transform-finalizer"
+	TransformFinalizer = "pequod.io/transform-finalizer"
 )
 
 // TransformHandlers contains all handlers for Transform reconciliation
@@ -100,6 +101,28 @@ func NewTransformHandlersWithConfig(
 	}
 }
 
+// updateStatusWithRetry updates the Transform status with retry-on-conflict pattern.
+// The updateFunc receives the latest Transform and should modify its Status fields.
+func (h *TransformHandlers) updateStatusWithRetry(
+	ctx context.Context,
+	tf *platformv1alpha1.Transform,
+	updateFunc func(*platformv1alpha1.Transform),
+) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		// Re-fetch the latest version of the Transform
+		latestTf := &platformv1alpha1.Transform{}
+		if err := h.client.Get(ctx, client.ObjectKeyFromObject(tf), latestTf); err != nil {
+			return err
+		}
+
+		// Apply the status updates
+		updateFunc(latestTf)
+
+		// Update the status
+		return h.client.Status().Update(ctx, latestTf)
+	})
+}
+
 // Reconcile executes the full reconciliation pipeline for a Transform.
 // In the new architecture, Transform generates a CRD from the CUE schema.
 func (h *TransformHandlers) Reconcile(ctx context.Context, nn types.NamespacedName) (ctrl.Result, error) {
@@ -141,15 +164,16 @@ func (h *TransformHandlers) Reconcile(ctx context.Context, nn types.NamespacedNa
 		// Only update Paused condition if not already set to True
 		existingCond := tf.GetCondition(pause.ConditionTypePaused)
 		if existingCond == nil || existingCond.Status != metav1.ConditionTrue {
-			tf.SetCondition(
-				pause.ConditionTypePaused,
-				metav1.ConditionTrue,
-				"Paused",
-				fmt.Sprintf("Reconciliation paused via %s annotation", PausedAnnotation),
-			)
-
-			if err := h.client.Status().Update(ctx, tf); err != nil {
+			if err := h.updateStatusWithRetry(ctx, tf, func(latestTf *platformv1alpha1.Transform) {
+				latestTf.SetCondition(
+					pause.ConditionTypePaused,
+					metav1.ConditionTrue,
+					"Paused",
+					fmt.Sprintf("Reconciliation paused via %s annotation", PausedAnnotation),
+				)
+			}); err != nil {
 				logger.Error(err, "failed to update paused condition")
+				return ctrl.Result{}, err
 			}
 		}
 
@@ -160,84 +184,94 @@ func (h *TransformHandlers) Reconcile(ctx context.Context, nn types.NamespacedNa
 	existingCond := tf.GetCondition(pause.ConditionTypePaused)
 	if existingCond != nil && existingCond.Status == metav1.ConditionTrue {
 		logger.Info("Transform unpaused, removing condition")
-		tf.SetCondition(
-			pause.ConditionTypePaused,
-			metav1.ConditionFalse,
-			"NotPaused",
-			"Reconciliation is not paused",
-		)
-
-		if err := h.client.Status().Update(ctx, tf); err != nil {
+		if err := h.updateStatusWithRetry(ctx, tf, func(latestTf *platformv1alpha1.Transform) {
+			latestTf.SetCondition(
+				pause.ConditionTypePaused,
+				metav1.ConditionFalse,
+				"NotPaused",
+				"Reconciliation is not paused",
+			)
+		}); err != nil {
 			logger.Error(err, "failed to remove paused condition")
+			return ctrl.Result{}, err
 		}
 	}
 
 	// Update phase to Fetching
-	tf.Status.Phase = platformv1alpha1.TransformPhaseFetching
-	if err := h.client.Status().Update(ctx, tf); err != nil {
+	if err := h.updateStatusWithRetry(ctx, tf, func(latestTf *platformv1alpha1.Transform) {
+		latestTf.Status.Phase = platformv1alpha1.TransformPhaseFetching
+	}); err != nil {
 		logger.Error(err, "failed to update phase to Fetching")
+		return ctrl.Result{}, err
 	}
 
 	// Step 4: Fetch CUE module and extract schema
 	inputSchema, fetchResult, err := h.fetchAndExtractSchema(ctx, tf)
 	if err != nil {
-		tf.Status.Phase = platformv1alpha1.TransformPhaseFailed
-		tf.SetCondition(
-			"CueFetched",
-			metav1.ConditionFalse,
-			"FetchFailed",
-			fmt.Sprintf("Failed to fetch/extract CUE schema: %v", err),
-		)
-		if statusErr := h.client.Status().Update(ctx, tf); statusErr != nil {
+		fetchErr := err
+		if statusErr := h.updateStatusWithRetry(ctx, tf, func(latestTf *platformv1alpha1.Transform) {
+			latestTf.Status.Phase = platformv1alpha1.TransformPhaseFailed
+			latestTf.SetCondition(
+				"CueFetched",
+				metav1.ConditionFalse,
+				"FetchFailed",
+				fmt.Sprintf("Failed to fetch/extract CUE schema: %v", fetchErr),
+			)
+		}); statusErr != nil {
 			logger.Error(statusErr, "failed to update status after fetch failure")
 		}
-		return ctrl.Result{}, err
+		return ctrl.Result{}, fetchErr
 	}
 
-	// Update CueFetched condition
-	tf.SetCondition(
-		"CueFetched",
-		metav1.ConditionTrue,
-		"ModuleFetched",
-		fmt.Sprintf("CUE module fetched from %s", fetchResult.Source),
-	)
-
-	// Update phase to Generating
-	tf.Status.Phase = platformv1alpha1.TransformPhaseGenerating
-	if err := h.client.Status().Update(ctx, tf); err != nil {
+	// Update CueFetched condition and phase to Generating
+	fetchSource := fetchResult.Source
+	if err := h.updateStatusWithRetry(ctx, tf, func(latestTf *platformv1alpha1.Transform) {
+		latestTf.SetCondition(
+			"CueFetched",
+			metav1.ConditionTrue,
+			"ModuleFetched",
+			fmt.Sprintf("CUE module fetched from %s", fetchSource),
+		)
+		latestTf.Status.Phase = platformv1alpha1.TransformPhaseGenerating
+	}); err != nil {
 		logger.Error(err, "failed to update phase to Generating")
+		return ctrl.Result{}, err
 	}
 
 	// Step 5: Generate and apply CRD
 	generatedCRD, err := h.generateAndApplyCRD(ctx, tf, inputSchema)
 	if err != nil {
-		tf.Status.Phase = platformv1alpha1.TransformPhaseFailed
-		tf.SetCondition(
-			"CRDGenerated",
-			metav1.ConditionFalse,
-			"GenerationFailed",
-			fmt.Sprintf("Failed to generate/apply CRD: %v", err),
-		)
-		if statusErr := h.client.Status().Update(ctx, tf); statusErr != nil {
+		crdErr := err
+		if statusErr := h.updateStatusWithRetry(ctx, tf, func(latestTf *platformv1alpha1.Transform) {
+			latestTf.Status.Phase = platformv1alpha1.TransformPhaseFailed
+			latestTf.SetCondition(
+				"CRDGenerated",
+				metav1.ConditionFalse,
+				"GenerationFailed",
+				fmt.Sprintf("Failed to generate/apply CRD: %v", crdErr),
+			)
+		}); statusErr != nil {
 			logger.Error(statusErr, "failed to update status after CRD generation failure")
 		}
-		return ctrl.Result{}, err
+		return ctrl.Result{}, crdErr
 	}
 
 	// Step 6: Generate and apply RBAC (if managedResources defined)
 	generatedRBAC, err := h.generateAndApplyRBAC(ctx, tf)
 	if err != nil {
-		tf.Status.Phase = platformv1alpha1.TransformPhaseFailed
-		tf.SetCondition(
-			"RBACConfigured",
-			metav1.ConditionFalse,
-			"RBACFailed",
-			fmt.Sprintf("Failed to generate/apply RBAC: %v", err),
-		)
-		if statusErr := h.client.Status().Update(ctx, tf); statusErr != nil {
+		rbacErr := err
+		if statusErr := h.updateStatusWithRetry(ctx, tf, func(latestTf *platformv1alpha1.Transform) {
+			latestTf.Status.Phase = platformv1alpha1.TransformPhaseFailed
+			latestTf.SetCondition(
+				"RBACConfigured",
+				metav1.ConditionFalse,
+				"RBACFailed",
+				fmt.Sprintf("Failed to generate/apply RBAC: %v", rbacErr),
+			)
+		}); statusErr != nil {
 			logger.Error(statusErr, "failed to update status after RBAC failure")
 		}
-		return ctrl.Result{}, err
+		return ctrl.Result{}, rbacErr
 	}
 
 	// Step 7: Update final status
@@ -428,66 +462,82 @@ func (h *TransformHandlers) updateStatus(
 ) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
-	// Update phase
-	tf.Status.Phase = platformv1alpha1.TransformPhaseReady
-
-	// Update GeneratedCRD reference
-	tf.Status.GeneratedCRD = generatedCRD
-
-	// Update GeneratedRBAC reference
-	tf.Status.GeneratedRBAC = generatedRBAC
-
-	// Update ResolvedCueRef with fetch result
+	// Capture digest for closure
+	var fetchDigest string
 	if fetchResult != nil {
-		now := metav1.Now()
-		tf.Status.ResolvedCueRef = &platformv1alpha1.ResolvedCueReference{
-			Digest:    fetchResult.Digest,
-			FetchedAt: &now,
-		}
+		fetchDigest = fetchResult.Digest
 	}
 
-	// Set conditions
-	tf.SetCondition(
-		"CRDGenerated",
-		metav1.ConditionTrue,
-		"CRDApplied",
-		fmt.Sprintf("CRD %s generated and applied successfully", generatedCRD.Name),
-	)
-
-	tf.SetCondition(
-		"SchemaExtracted",
-		metav1.ConditionTrue,
-		"SchemaExtracted",
-		"Input schema extracted from CUE module",
-	)
-
-	// Set RBAC condition (only if RBAC was generated)
-	if generatedRBAC != nil {
-		var rbacMessage string
-		if generatedRBAC.ClusterRoleName != "" {
-			rbacMessage = fmt.Sprintf("ClusterRole %s configured with %d rules", generatedRBAC.ClusterRoleName, generatedRBAC.RuleCount)
-		} else if generatedRBAC.RoleName != "" {
-			rbacMessage = fmt.Sprintf("Role %s and RoleBinding %s configured with %d rules",
-				generatedRBAC.RoleName, generatedRBAC.RoleBindingName, generatedRBAC.RuleCount)
+	// Use retry-on-conflict for status update
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		// Re-fetch the latest version
+		latestTf := &platformv1alpha1.Transform{}
+		if err := h.client.Get(ctx, client.ObjectKeyFromObject(tf), latestTf); err != nil {
+			return err
 		}
-		tf.SetCondition(
-			"RBACConfigured",
+
+		// Update phase
+		latestTf.Status.Phase = platformv1alpha1.TransformPhaseReady
+
+		// Update GeneratedCRD reference
+		latestTf.Status.GeneratedCRD = generatedCRD
+
+		// Update GeneratedRBAC reference
+		latestTf.Status.GeneratedRBAC = generatedRBAC
+
+		// Update ResolvedCueRef with fetch result
+		if fetchDigest != "" {
+			now := metav1.Now()
+			latestTf.Status.ResolvedCueRef = &platformv1alpha1.ResolvedCueReference{
+				Digest:    fetchDigest,
+				FetchedAt: &now,
+			}
+		}
+
+		// Set conditions
+		latestTf.SetCondition(
+			"CRDGenerated",
 			metav1.ConditionTrue,
-			"RBACApplied",
-			rbacMessage,
+			"CRDApplied",
+			fmt.Sprintf("CRD %s generated and applied successfully", generatedCRD.Name),
 		)
-	}
 
-	// Update observed generation
-	tf.Status.ObservedGeneration = tf.Generation
+		latestTf.SetCondition(
+			"SchemaExtracted",
+			metav1.ConditionTrue,
+			"SchemaExtracted",
+			"Input schema extracted from CUE module",
+		)
 
-	// Update status
-	if err := h.client.Status().Update(ctx, tf); err != nil {
+		// Set RBAC condition (only if RBAC was generated)
+		if generatedRBAC != nil {
+			var rbacMessage string
+			if generatedRBAC.ClusterRoleName != "" {
+				rbacMessage = fmt.Sprintf("ClusterRole %s configured with %d rules", generatedRBAC.ClusterRoleName, generatedRBAC.RuleCount)
+			} else if generatedRBAC.RoleName != "" {
+				rbacMessage = fmt.Sprintf("Role %s and RoleBinding %s configured with %d rules",
+					generatedRBAC.RoleName, generatedRBAC.RoleBindingName, generatedRBAC.RuleCount)
+			}
+			latestTf.SetCondition(
+				"RBACConfigured",
+				metav1.ConditionTrue,
+				"RBACApplied",
+				rbacMessage,
+			)
+		}
+
+		// Update observed generation
+		latestTf.Status.ObservedGeneration = latestTf.Generation
+
+		return h.client.Status().Update(ctx, latestTf)
+	})
+
+	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to update status: %w", err)
 	}
 
 	logger.Info("Transform reconciled successfully",
-		"phase", tf.Status.Phase,
+		"phase", platformv1alpha1.TransformPhaseReady,
 		"crd", generatedCRD.Name,
 		"kind", generatedCRD.Kind)
 

@@ -31,10 +31,10 @@ const (
 	AggregationLabel = "pequod.io/aggregate-to-manager"
 
 	// TransformLabel identifies which Transform owns a role
-	TransformLabel = "platform.pequod.io/transform"
+	TransformLabel = "pequod.io/transform"
 
 	// TransformNamespaceLabel identifies the namespace of the Transform
-	TransformNamespaceLabel = "platform.pequod.io/transform-namespace"
+	TransformNamespaceLabel = "pequod.io/transform-namespace"
 
 	// RolePrefix is the prefix for generated role names
 	RolePrefix = "pequod:transform:"

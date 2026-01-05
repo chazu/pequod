@@ -24,6 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -53,6 +54,11 @@ type PlatformInstanceReconciler struct {
 	watchedGVKs map[schema.GroupVersionKind]bool
 	watchMutex  sync.RWMutex
 
+	// instanceGVKIndex maps NamespacedName to GVK for O(1) lookup during reconcile.
+	// This avoids iterating through all watched GVKs and making API calls.
+	instanceGVKIndex map[types.NamespacedName]schema.GroupVersionKind
+	indexMutex       sync.RWMutex
+
 	// controller is the underlying controller for dynamic watch management
 	ctrl controller.Controller
 
@@ -61,37 +67,62 @@ type PlatformInstanceReconciler struct {
 }
 
 // +kubebuilder:rbac:groups=*,resources=*,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=platform.pequod.io,resources=resourcegraphs,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=platform.pequod.io,resources=resourcegraphs/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=platform.pequod.io,resources=transforms,verbs=get;list;watch
+// +kubebuilder:rbac:groups=pequod.io,resources=resourcegraphs,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=pequod.io,resources=resourcegraphs/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=pequod.io,resources=transforms,verbs=get;list;watch
 
 // Reconcile handles platform instance resources (e.g., WebService instances)
 func (r *PlatformInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := logf.FromContext(ctx)
 
-	// We need to determine the GVK from the request
-	// The request only contains namespace/name, so we need to find the matching instance
-	// by checking all watched GVKs
-
-	r.watchMutex.RLock()
-	gvks := make([]schema.GroupVersionKind, 0, len(r.watchedGVKs))
-	for gvk := range r.watchedGVKs {
-		gvks = append(gvks, gvk)
-	}
-	r.watchMutex.RUnlock()
-
-	// Try to get the instance using each watched GVK
 	var instance *unstructured.Unstructured
 	var instanceGVK schema.GroupVersionKind
 
-	for _, gvk := range gvks {
+	// First, try O(1) lookup from the GVK index
+	r.indexMutex.RLock()
+	cachedGVK, found := r.instanceGVKIndex[req.NamespacedName]
+	r.indexMutex.RUnlock()
+
+	if found {
+		// Use the cached GVK for a direct lookup
 		u := &unstructured.Unstructured{}
-		u.SetGroupVersionKind(gvk)
+		u.SetGroupVersionKind(cachedGVK)
 
 		if err := r.Get(ctx, req.NamespacedName, u); err == nil {
 			instance = u
-			instanceGVK = gvk
-			break
+			instanceGVK = cachedGVK
+		} else {
+			// Object not found - remove stale index entry
+			r.indexMutex.Lock()
+			delete(r.instanceGVKIndex, req.NamespacedName)
+			r.indexMutex.Unlock()
+			logger.V(1).Info("Instance not found (removed from index)", "request", req)
+			return ctrl.Result{}, nil
+		}
+	} else {
+		// Fallback: iterate through watched GVKs (should rarely happen)
+		// This handles cases where the watch event hasn't populated the index yet
+		r.watchMutex.RLock()
+		gvks := make([]schema.GroupVersionKind, 0, len(r.watchedGVKs))
+		for gvk := range r.watchedGVKs {
+			gvks = append(gvks, gvk)
+		}
+		r.watchMutex.RUnlock()
+
+		for _, gvk := range gvks {
+			u := &unstructured.Unstructured{}
+			u.SetGroupVersionKind(gvk)
+
+			if err := r.Get(ctx, req.NamespacedName, u); err == nil {
+				instance = u
+				instanceGVK = gvk
+
+				// Populate the index for future lookups
+				r.indexMutex.Lock()
+				r.instanceGVKIndex[req.NamespacedName] = gvk
+				r.indexMutex.Unlock()
+				break
+			}
 		}
 	}
 
@@ -121,6 +152,7 @@ func (r *PlatformInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 func (r *PlatformInstanceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	r.mgr = mgr
 	r.watchedGVKs = make(map[schema.GroupVersionKind]bool)
+	r.instanceGVKIndex = make(map[types.NamespacedName]schema.GroupVersionKind)
 
 	// Initialize the handler
 	r.handler = reconcile.NewInstanceHandlers(
@@ -265,9 +297,15 @@ func (r *PlatformInstanceReconciler) addWatch(ctx context.Context, gvk schema.Gr
 			u,
 			handler.TypedEnqueueRequestsFromMapFunc(
 				func(ctx context.Context, obj *unstructured.Unstructured) []ctrl.Request {
-					return []ctrl.Request{
-						{NamespacedName: client.ObjectKeyFromObject(obj)},
-					}
+					key := client.ObjectKeyFromObject(obj)
+					objGVK := obj.GetObjectKind().GroupVersionKind()
+
+					// Update the GVK index for O(1) lookup during reconcile
+					r.indexMutex.Lock()
+					r.instanceGVKIndex[key] = objGVK
+					r.indexMutex.Unlock()
+
+					return []ctrl.Request{{NamespacedName: key}}
 				},
 			),
 		),

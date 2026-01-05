@@ -201,8 +201,8 @@ type TransformSpec struct {
 	CueRef CueReference `json:"cueRef"`
 
 	// Group is the API group for the generated CRD
-	// Defaults to "platform.pequod.io"
-	// +kubebuilder:default="platform.pequod.io"
+	// Defaults to "pequod.io"
+	// +kubebuilder:default="pequod.io"
 	// +optional
 	Group string `json:"group,omitempty"`
 

@@ -17,7 +17,7 @@ import (
 
 const (
 	// DefaultGroup is the default API group for generated CRDs
-	DefaultGroup = "platform.pequod.io"
+	DefaultGroup = "pequod.io"
 
 	// DefaultVersion is the default API version for generated CRDs
 	DefaultVersion = "v1alpha1"
@@ -34,7 +34,7 @@ const (
 
 // GeneratorConfig contains configuration for CRD generation
 type GeneratorConfig struct {
-	// Group is the API group (default: platform.pequod.io)
+	// Group is the API group (default: pequod.io)
 	Group string
 
 	// Version is the API version (default: v1alpha1)

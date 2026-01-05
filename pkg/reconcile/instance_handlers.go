@@ -38,13 +38,13 @@ import (
 
 const (
 	// InstanceFinalizer is the finalizer added to platform instances
-	InstanceFinalizer = "platform.pequod.io/instance-finalizer"
+	InstanceFinalizer = "pequod.io/instance-finalizer"
 
 	// TransformAnnotation links an instance to its Transform
-	TransformAnnotation = "platform.pequod.io/transform"
+	TransformAnnotation = "pequod.io/transform"
 
 	// TransformNamespaceAnnotation is the namespace of the Transform
-	TransformNamespaceAnnotation = "platform.pequod.io/transform-namespace"
+	TransformNamespaceAnnotation = "pequod.io/transform-namespace"
 )
 
 // InstanceHandlers contains handlers for platform instance reconciliation.

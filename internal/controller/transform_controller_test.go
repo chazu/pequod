@@ -51,6 +51,12 @@ var _ = Describe("Transform Controller", Ordered, func() {
 			if err == nil {
 				By("Cleaning up the Transform")
 				Expect(k8sClient.Delete(ctx, tf)).To(Succeed())
+
+				// Wait for the Transform to be fully deleted (including finalizer processing)
+				Eventually(func() bool {
+					err := k8sClient.Get(ctx, typeNamespacedName, tf)
+					return client.IgnoreNotFound(err) == nil && err != nil
+				}, timeout, interval).Should(BeTrue(), "Transform should be fully deleted")
 			}
 
 			// Cleanup any generated CRDs
@@ -59,7 +65,7 @@ var _ = Describe("Transform Controller", Ordered, func() {
 			if err == nil {
 				for _, crd := range crdList.Items {
 					// Only delete CRDs created by our tests
-					if crd.Labels != nil && crd.Labels["platform.pequod.io/transform"] != "" {
+					if crd.Labels != nil && crd.Labels["pequod.io/transform"] != "" {
 						_ = k8sClient.Delete(ctx, &crd)
 					}
 				}
@@ -115,8 +121,7 @@ var _ = Describe("Transform Controller", Ordered, func() {
 			Expect(crd.Spec.Scope).To(Equal(apiextensionsv1.NamespaceScoped))
 		})
 
-		PIt("should update the CRD when Transform spec changes", func() {
-			// Skip: This test has race conditions due to concurrent status updates
+		It("should update the CRD when Transform spec changes", func() {
 			By("Creating a Transform")
 
 			tf := &platformv1alpha1.Transform{
@@ -167,8 +172,7 @@ var _ = Describe("Transform Controller", Ordered, func() {
 			}, timeout, interval).Should(ContainElements("tt", "test"))
 		})
 
-		PIt("should handle paused transforms", func() {
-			// Skip: Paused condition check is timing-dependent in integration tests
+		It("should handle paused transforms", func() {
 			By("Creating a paused Transform")
 
 			tf := &platformv1alpha1.Transform{
@@ -176,7 +180,7 @@ var _ = Describe("Transform Controller", Ordered, func() {
 					Name:      transformName,
 					Namespace: namespace,
 					Labels: map[string]string{
-						"platform.pequod.io/paused": "true",
+						"pequod.io/paused": "true",
 					},
 				},
 				Spec: platformv1alpha1.TransformSpec{
@@ -201,8 +205,7 @@ var _ = Describe("Transform Controller", Ordered, func() {
 			}, "2s", interval).Should(BeTrue())
 		})
 
-		PIt("should delete the CRD when Transform is deleted", func() {
-			// Skip: Finalizer-based deletion has race conditions in integration tests
+		It("should delete the CRD when Transform is deleted", func() {
 			By("Creating a Transform")
 
 			tf := &platformv1alpha1.Transform{
@@ -296,8 +299,8 @@ var _ = Describe("Transform Controller", Ordered, func() {
 			Expect(cr.Labels).To(HaveKeyWithValue("pequod.io/aggregate-to-manager", "true"))
 
 			// Verify transform labels
-			Expect(cr.Labels).To(HaveKeyWithValue("platform.pequod.io/transform", rbacTransformName))
-			Expect(cr.Labels).To(HaveKeyWithValue("platform.pequod.io/transform-namespace", namespace))
+			Expect(cr.Labels).To(HaveKeyWithValue("pequod.io/transform", rbacTransformName))
+			Expect(cr.Labels).To(HaveKeyWithValue("pequod.io/transform-namespace", namespace))
 
 			// Verify rules
 			Expect(cr.Rules).To(HaveLen(2))

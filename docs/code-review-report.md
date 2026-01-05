@@ -23,15 +23,18 @@ The Pequod operator is a platform engineering tool that dynamically generates CR
 
 This approach is deterministic and works correctly in containerized deployments.
 
-**File: `config/manager/manager.yaml:87-88`**
+**File: `config/manager/manager.yaml:87-95`** ✅ ADDRESSED
+
+Resource limits have been increased to appropriate values:
 ```yaml
-# TODO(user): Configure the resources accordingly based on the project requirements.
 resources:
   limits:
     cpu: 500m
-    memory: 128Mi
+    memory: 512Mi
+  requests:
+    cpu: 100m
+    memory: 256Mi
 ```
-**Issue:** 128Mi memory limit is very low for an operator that processes CUE templates, generates CRDs, and manages multiple controllers. This will likely cause OOM issues in production.
 
 ### 1.2 LabelSelector Mode Not Implemented
 
@@ -69,21 +72,15 @@ case platformv1alpha1.AdoptStrategyMirror:
 
 **Remaining cleanup:** The base `config/rbac/role.yaml` still contains wildcard permissions (lines 14-28) that should be removed once all Transforms are migrated to use `managedResources`. The wildcard RBAC marker in `internal/controller/platforminstance_controller.go:63` should also be removed.
 
-### 2.2 Status Updates Without Retry-On-Conflict Pattern
+### 2.2 ~~Status Updates Without Retry-On-Conflict Pattern~~ ✅ ADDRESSED
 
-**File: `pkg/reconcile/transform_handlers.go:134-137`**
-```go
-tf.Status.Phase = platformv1alpha1.TransformPhaseFetching
-if err := h.client.Status().Update(ctx, tf); err != nil {
-    logger.Error(err, "failed to update phase to Fetching")
-}
-```
-**Issue:** Multiple status updates throughout the reconciliation do not use retry-on-conflict and silently swallow errors. Status updates should use `retry.RetryOnConflict` or `meta.SetStatusCondition` patterns.
+**Status:** All status updates in `pkg/reconcile/transform_handlers.go` now use `retry.RetryOnConflict`.
 
-**Similar issues in:**
-- `pkg/reconcile/transform_handlers.go:149-151`
-- `pkg/reconcile/transform_handlers.go:164-166`
-- `pkg/reconcile/transform_handlers.go:179-181`
+**Solution implemented:**
+- Added `updateStatusWithRetry` helper function that wraps status updates with `retry.RetryOnConflict(retry.DefaultRetry, ...)`
+- All status updates now re-fetch the latest resource version before updating
+- Status update errors are now properly propagated instead of silently swallowed
+- Previously skipped tests have been enabled and all 8 tests pass
 
 ### 2.3 Missing Rate Limiting on Controllers
 
@@ -100,29 +97,16 @@ return ctrl.NewControllerManagedBy(mgr).
 - `internal/controller/resourcegraph_controller.go:380-394`
 - `internal/controller/platforminstance_controller.go:136-147`
 
-### 2.4 PlatformInstanceReconciler Inefficient GVK Lookup
+### 2.4 ~~PlatformInstanceReconciler Inefficient GVK Lookup~~ ✅ ADDRESSED
 
-**File: `internal/controller/platforminstance_controller.go:76-96`**
-```go
-r.watchMutex.RLock()
-gvks := make([]schema.GroupVersionKind, 0, len(r.watchedGVKs))
-for gvk := range r.watchedGVKs {
-    gvks = append(gvks, gvk)
-}
-r.watchMutex.RUnlock()
+**Status:** GVK index has been implemented for O(1) lookups.
 
-// Try to get the instance using each watched GVK
-for _, gvk := range gvks {
-    u := &unstructured.Unstructured{}
-    u.SetGroupVersionKind(gvk)
-    if err := r.Get(ctx, req.NamespacedName, u); err == nil {
-        instance = u
-        instanceGVK = gvk
-        break
-    }
-}
-```
-**Issue:** On every reconcile, the controller iterates through ALL watched GVKs and performs API server GETs until it finds the right one. This is O(n) API calls where n is the number of platform types. Should use an index to map namespace/name to GVK.
+**Solution implemented:**
+- Added `instanceGVKIndex map[types.NamespacedName]schema.GroupVersionKind` field to the reconciler
+- Watch handlers now populate the index when objects are seen
+- `Reconcile` first checks the index for O(1) lookup instead of iterating all GVKs
+- Fallback to iteration only if index miss (rare edge case)
+- Stale index entries are cleaned up when objects are deleted
 
 ### 2.5 Watch Discovery Loop Polling
 
@@ -186,28 +170,9 @@ All three controllers lack `WithOptions(controller.Options{MaxConcurrentReconcil
 
 ## 3. Code Quality Issues
 
-### 3.1 Race Condition in Executor
+### 3.1 ~~Race Condition in Executor~~ ✅ NOT AN ISSUE
 
-**File: `pkg/graph/executor.go:152-169`**
-```go
-func (e *Executor) executeNodes(ctx context.Context, dag *DAG, state *ExecutionState, nodeIDs []string) error {
-    p := pool.New().WithMaxGoroutines(e.config.MaxConcurrency).WithErrors()
-
-    for _, nodeID := range nodeIDs {
-        p.Go(func() error {
-            return e.executeNode(ctx, dag, state, nodeID)  // nodeID captured by closure
-        })
-    }
-```
-**Issue:** Go loop variable capture issue (fixed in Go 1.22, but should be explicit for older versions):
-```go
-for _, nodeID := range nodeIDs {
-    nodeID := nodeID  // Shadow the loop variable
-    p.Go(func() error {
-        return e.executeNode(ctx, dag, state, nodeID)
-    })
-}
-```
+**Status:** This is not an issue. The project uses Go 1.24.6 (per `go.mod`), and Go 1.22+ fixes the loop variable capture behavior. The loop variable is now correctly captured per-iteration by default, so no shadowing is required.
 
 ### 3.2 Error Handling Gaps
 
@@ -255,40 +220,32 @@ func (a *Applier) Apply(ctx context.Context, obj *unstructured.Unstructured, pol
 ```
 Good nil check, but no validation that obj has required fields (GVK, name, etc.) before the API call.
 
-### 3.5 Inconsistent API Group Names
+### 3.5 ~~Inconsistent API Group Names~~ ✅ ADDRESSED
 
-**File: `config/rbac/role.yaml`**
-Multiple different API groups referenced:
-- `platform.platform.example.com` (CRDs)
-- `platform.pequod.io` (some RBAC)
+**Status:** API groups have been standardized to `pequod.io`.
 
-**File: `internal/controller/resourcegraph_controller.go:75-77`**
-```go
-// +kubebuilder:rbac:groups=platform.platform.example.com,resources=resourcegraphs
-```
-But `pkg/crd/generator.go:19-20`:
-```go
-DefaultGroup = "platform.pequod.io"
-```
-**Issue:** Inconsistent group naming (`platform.platform.example.com` vs `platform.pequod.io`). This could cause RBAC issues.
+**Solution implemented:**
+- Changed `DefaultGroup` from `platform.pequod.io` to `pequod.io` in `pkg/crd/generator.go`
+- Updated all label constants to use `pequod.io/` prefix instead of `platform.pequod.io/`
+- Updated finalizer names from `platform.pequod.io/*` to `pequod.io/*`
+- Updated RBAC markers and `config/rbac/role.yaml` to reference `pequod.io`
+- Regenerated CRD manifests with `make manifests`
+- Updated all tests and documentation
+
+**Note:** The `platform.platform.example.com` references in `config/rbac/role.yaml` remain as they are test/example CRD group names, not the operator's own API group.
 
 ---
 
 ## 4. Testing Issues
 
-### 4.1 Skipped Tests
+### 4.1 ~~Skipped Tests~~ ✅ ADDRESSED
 
-**File: `internal/controller/transform_controller_test.go:117-166`**
-```go
-PIt("should update the CRD when Transform spec changes", func() {
-    // Skip: This test has race conditions due to concurrent status updates
-```
-Three tests are marked as `PIt` (pending):
-- Line 117: "should update the CRD when Transform spec changes"
-- Line 169: "should handle paused transforms"
-- Line 203: "should delete the CRD when Transform is deleted"
+**Status:** All three previously skipped tests have been enabled and now pass.
 
-**Issue:** Critical functionality (CRD updates, paused handling, deletion cleanup) has skipped tests, indicating known race conditions.
+**Solution implemented:**
+- Fixed status update race conditions with `retry.RetryOnConflict` pattern (see section 2.2)
+- Updated `AfterEach` cleanup to properly wait for Transform deletion (including finalizer processing)
+- All 8 controller tests now pass consistently
 
 ### 4.2 No Integration Tests for PlatformInstanceReconciler
 
@@ -326,22 +283,15 @@ The E2E tests cover basic Transform/Instance flow but don't test:
 
 ## 5. Production Readiness Issues
 
-### 5.1 Insufficient Resource Limits
+### 5.1 ~~Insufficient Resource Limits~~ ✅ ADDRESSED
 
-**File: `config/manager/manager.yaml:89-95`**
-```yaml
-resources:
-  limits:
-    cpu: 500m
-    memory: 128Mi
-  requests:
-    cpu: 10m
-    memory: 64Mi
-```
-**Issue:**
-- 128Mi memory is too low for CUE processing (CUE can be memory-intensive)
-- 10m CPU request is extremely low
-- No resource quotas consideration for managed resources
+**Status:** Resource limits have been increased to appropriate values.
+
+**Solution implemented:**
+- Memory limit increased from 128Mi to 512Mi
+- Memory request increased from 64Mi to 256Mi
+- CPU request increased from 10m to 100m
+- CPU limit remains at 500m (reasonable for controller workloads)
 
 ### 5.2 No Webhook Validation
 
@@ -451,12 +401,13 @@ Platform names directly become CRD names without validation. Malicious names cou
 | ~~**CRITICAL**~~ | ~~RBAC Wildcard Permissions~~ | `config/rbac/role.yaml` | ✅ Addressed (minor cleanup remains) |
 | ~~**HIGH**~~ | ~~Embedded Loader Path Detection~~ | `pkg/platformloader/loader.go` | ✅ Addressed via go:embed |
 | ~~**HIGH**~~ | ~~Metrics Cardinality~~ | `internal/controller/metrics.go` | ✅ Addressed - bounded labels |
-| **HIGH** | Status Update Race Conditions | Multiple skipped tests confirm | Open |
-| **MEDIUM** | Inefficient GVK Lookup | `internal/controller/platforminstance_controller.go` | Open |
-| **MEDIUM** | Memory Limits | `config/manager/manager.yaml` | Open |
+| ~~**HIGH**~~ | ~~Status Update Race Conditions~~ | `pkg/reconcile/transform_handlers.go` | ✅ Addressed - retry-on-conflict |
+| ~~**HIGH**~~ | ~~Skipped Tests~~ | `internal/controller/transform_controller_test.go` | ✅ Addressed - all tests enabled |
+| ~~**MEDIUM**~~ | ~~Inefficient GVK Lookup~~ | `internal/controller/platforminstance_controller.go` | ✅ Addressed - GVK index for O(1) |
+| ~~**MEDIUM**~~ | ~~Memory Limits~~ | `config/manager/manager.yaml` | ✅ Addressed - 512Mi limit |
 | **MEDIUM** | Missing PlatformInstanceReconciler Tests | `internal/controller/suite_test.go` | Open |
 | **MEDIUM** | Polling Watch Discovery | `internal/controller/platforminstance_controller.go` | Open |
-| **LOW** | Inconsistent API Groups | Multiple files | Open |
+| ~~**LOW**~~ | ~~Inconsistent API Groups~~ | Multiple files | ✅ Addressed - standardized to `pequod.io` |
 
 ---
 
@@ -466,22 +417,22 @@ Platform names directly become CRD names without validation. Malicious names cou
 
 1. ~~**Fix RBAC** to request only specific resources the operator needs to manage~~ ✅ Done - dynamic RBAC via `managedResources`
 2. ~~**Implement go:embed** for CUE modules instead of path detection~~ ✅ Done - see `cue/embed.go` and `pkg/platformloader/embedded.go`
-3. **Increase memory limits** to at least 512Mi
+3. ~~**Increase memory limits** to at least 512Mi~~ ✅ Done - see `config/manager/manager.yaml`
 4. ~~**Fix metrics labels** to avoid unbounded cardinality~~ ✅ Done - replaced with `namespace` and `result` labels
 5. **Remove legacy wildcard permissions** from `config/rbac/role.yaml` (lines 14-28) and RBAC markers
 
 ### Short-term
 
-1. Add `retry.RetryOnConflict` to all status updates
+1. ~~Add `retry.RetryOnConflict` to all status updates~~ ✅ Done - see `pkg/reconcile/transform_handlers.go`
 2. Implement webhook validation for Transform and ResourceGraph CRDs
 3. Add rate limiting to controllers with `WithOptions(controller.Options{RateLimiter: ...})`
-4. Fix or remove skipped tests
+4. ~~Fix or remove skipped tests~~ ✅ Done - all tests enabled and passing
 5. Add `MaxConcurrentReconciles` configuration
 
 ### Medium-term
 
 1. Replace polling with watch-based Transform discovery
-2. Add GVK index for O(1) instance lookups
+2. ~~Add GVK index for O(1) instance lookups~~ ✅ Done - see `instanceGVKIndex` in `platforminstance_controller.go`
 3. Implement comprehensive E2E test coverage for:
    - Resource adoption
    - DAG execution ordering

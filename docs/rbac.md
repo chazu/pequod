@@ -37,7 +37,7 @@ Transform with managedResources
 │  ClusterRole:               │ │  Role (in Transform namespace): │
 │    pequod:transform:ns.name │ │    pequod:transform:ns.name     │
 │  ├── labels:                │ │  ├── labels:                    │
-│  │   pequod.io/aggregate-   │ │  │   platform.pequod.io/        │
+│  │   pequod.io/aggregate-   │ │  │   pequod.io/                 │
 │  │     to-manager: "true"   │ │  │     transform: <name>        │
 │  └── rules: [...]           │ │  └── rules: [...]               │
 │                             │ │                                 │
@@ -151,8 +151,8 @@ metadata:
   name: pequod:transform:default.webservice
   labels:
     pequod.io/aggregate-to-manager: "true"
-    platform.pequod.io/transform: webservice
-    platform.pequod.io/transform-namespace: default
+    pequod.io/transform: webservice
+    pequod.io/transform-namespace: default
 rules:
   - apiGroups: ["apps"]
     resources: ["deployments"]
@@ -171,8 +171,8 @@ metadata:
   name: pequod:transform:team-a.myapp
   namespace: team-a
   labels:
-    platform.pequod.io/transform: myapp
-    platform.pequod.io/transform-namespace: team-a
+    pequod.io/transform: myapp
+    pequod.io/transform-namespace: team-a
 rules:
   - apiGroups: ["apps"]
     resources: ["deployments"]
@@ -247,7 +247,7 @@ Check that:
 ### Permission Denied Errors
 
 If the controller can't manage resources:
-1. Check the generated ClusterRole/Role exists: `kubectl get clusterrole -l platform.pequod.io/transform=<name>`
+1. Check the generated ClusterRole/Role exists: `kubectl get clusterrole -l pequod.io/transform=<name>`
 2. Verify aggregation is working: `kubectl get clusterrole pequod-manager-aggregate -o yaml`
 3. Check RoleBinding subjects for namespace-scoped Transforms
 

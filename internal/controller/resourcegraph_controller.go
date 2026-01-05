@@ -41,7 +41,7 @@ import (
 )
 
 const (
-	resourceGraphFinalizer = "platform.pequod.io/resourcegraph-finalizer"
+	resourceGraphFinalizer = "pequod.io/resourcegraph-finalizer"
 
 	// Phase constants for ResourceGraph status
 	PhasePending   = "Pending"

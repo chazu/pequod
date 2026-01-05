@@ -163,7 +163,7 @@ spec:
   cueRef:
     type: embedded
     ref: webservice
-  group: apps.mycompany.com  # Optional, defaults to platform.pequod.io
+  group: apps.mycompany.com  # Optional, defaults to pequod.io
   shortNames: [ws]
 ```
 

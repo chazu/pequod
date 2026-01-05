@@ -15,7 +15,7 @@ spec:
     ref: webservice
 
   # Optional: Override the API group for generated CRD
-  # Defaults to "platform.pequod.io"
+  # Defaults to "pequod.io"
   group: apps.example.com
 
   # Optional: Override the API version
