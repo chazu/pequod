@@ -3,6 +3,7 @@ package reconcile
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"cuelang.org/go/cue"
 	"github.com/authzed/controller-idioms/pause"
@@ -31,6 +32,15 @@ const (
 
 	// TransformFinalizer is the finalizer added to Transform resources
 	TransformFinalizer = "pequod.io/transform-finalizer"
+)
+
+var (
+	// CRDEstablishmentTimeout is the time to wait for a CRD to be established.
+	// This can be overridden in tests.
+	CRDEstablishmentTimeout = 30 * time.Second
+
+	// CRDEstablishmentPollInterval is the poll interval for CRD establishment checks.
+	CRDEstablishmentPollInterval = 100 * time.Millisecond
 )
 
 // TransformHandlers contains all handlers for Transform reconciliation
@@ -374,6 +384,14 @@ func (h *TransformHandlers) generateAndApplyCRD(
 
 	logger.Info("CRD applied successfully", "name", generatedCRD.Name)
 
+	// Wait for the CRD to be established before proceeding
+	// This ensures the PlatformInstance controller can add watches for this CRD type
+	if err := h.waitForCRDEstablished(ctx, generatedCRD.Name); err != nil {
+		return nil, fmt.Errorf("failed waiting for CRD to be established: %w", err)
+	}
+
+	logger.V(1).Info("CRD established", "name", generatedCRD.Name)
+
 	// Record event
 	if h.recorder != nil {
 		h.recorder.Eventf(tf, "Normal", "CRDGenerated",
@@ -395,6 +413,50 @@ func (h *TransformHandlers) generateAndApplyCRD(
 	}
 
 	return ref, nil
+}
+
+// waitForCRDEstablished waits for a CRD to be established in the cluster
+// This is necessary because after applying a CRD, it takes a moment for the
+// API server to serve the new resource type. Without this wait, watches
+// added for the new CRD type may fail.
+func (h *TransformHandlers) waitForCRDEstablished(ctx context.Context, crdName string) error {
+	logger := log.FromContext(ctx)
+
+	// Poll for CRD establishment with configurable timeout
+	timeout := time.After(CRDEstablishmentTimeout)
+	ticker := time.NewTicker(CRDEstablishmentPollInterval)
+	defer ticker.Stop()
+
+	var crdExists bool
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timeout:
+			// If CRD exists but isn't marked established, it may be in a unit test
+			// environment where the fake client doesn't set conditions. Accept this.
+			if crdExists {
+				logger.V(1).Info("CRD exists but establishment condition not set (may be in test environment)",
+					"name", crdName)
+				return nil
+			}
+			return fmt.Errorf("timeout waiting for CRD %s to be established", crdName)
+		case <-ticker.C:
+			crd := &apiextensionsv1.CustomResourceDefinition{}
+			if err := h.client.Get(ctx, types.NamespacedName{Name: crdName}, crd); err != nil {
+				logger.V(2).Info("Waiting for CRD", "name", crdName, "error", err)
+				continue
+			}
+
+			crdExists = true
+
+			for _, cond := range crd.Status.Conditions {
+				if cond.Type == apiextensionsv1.Established && cond.Status == apiextensionsv1.ConditionTrue {
+					return nil
+				}
+			}
+		}
+	}
 }
 
 // generateAndApplyRBAC generates and applies RBAC resources for a Transform

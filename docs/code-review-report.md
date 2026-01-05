@@ -108,40 +108,28 @@ return ctrl.NewControllerManagedBy(mgr).
 - Fallback to iteration only if index miss (rare edge case)
 - Stale index entries are cleaned up when objects are deleted
 
-### 2.5 Watch Discovery Loop Polling
+### 2.5 ~~Watch Discovery Loop Polling~~ ✅ ADDRESSED
 
-**File: `internal/controller/platforminstance_controller.go:183-198`**
-```go
-ticker := time.NewTicker(10 * time.Second)
-defer ticker.Stop()
+**Status:** Replaced polling with event-driven watch discovery.
 
-// Initial discovery
-r.discoverAndWatchPlatformTypes(ctx)
+**Solution implemented:**
+- Added `handleTransformChange` method that processes Transform changes directly
+- The Transform watch now calls this handler instead of returning nil
+- Replaced `watchDiscoveryRunnable` (10-second polling) with `initialDiscoveryRunnable` (one-time startup only)
+- When a Transform's status is updated with `GeneratedCRD`, the watch immediately adds a watch for that CRD type
+- Initial discovery still runs at startup to catch pre-existing Transforms
 
-for {
-    select {
-    case <-ctx.Done():
-        return
-    case <-ticker.C:
-        r.discoverAndWatchPlatformTypes(ctx)
-    }
-}
-```
-**Issue:** Polling every 10 seconds is inefficient. Should use a Watch on Transforms instead and react to Transform changes. The Transform watch in `SetupWithManager` returns empty requests, defeating its purpose.
+This is more efficient and responsive - watches are added immediately when Transforms are created, not up to 10 seconds later.
 
-### 2.6 Watch Removal Not Actually Working
+### 2.6 ~~Watch Removal Not Actually Working~~ ✅ ADDRESSED
 
-**File: `internal/controller/platforminstance_controller.go:278-284`**
-```go
-func (r *PlatformInstanceReconciler) RemoveWatch(gvk schema.GroupVersionKind) {
-    r.watchMutex.Lock()
-    defer r.watchMutex.Unlock()
-    delete(r.watchedGVKs, gvk)
-    // Note: controller-runtime doesn't support removing watches dynamically
-    // The watch will remain but instances will 404 since the CRD is deleted
-}
-```
-**Issue:** The comment acknowledges that watches cannot be removed, but `RemoveWatch` is still exposed in the API, misleading callers.
+**Status:** Documentation clarified; behavior is correct given controller-runtime limitations.
+
+**Solution implemented:**
+- Updated `RemoveWatch` documentation to clearly explain that it removes the GVK from the tracking map only
+- The underlying informer watch cannot be removed (controller-runtime limitation)
+- The watch naturally stops receiving events once the associated CRD is deleted from the cluster
+- This is the expected behavior and not a bug
 
 ### 2.7 Missing Condition Management with ObservedGeneration
 
@@ -406,7 +394,7 @@ Platform names directly become CRD names without validation. Malicious names cou
 | ~~**MEDIUM**~~ | ~~Inefficient GVK Lookup~~ | `internal/controller/platforminstance_controller.go` | ✅ Addressed - GVK index for O(1) |
 | ~~**MEDIUM**~~ | ~~Memory Limits~~ | `config/manager/manager.yaml` | ✅ Addressed - 512Mi limit |
 | **MEDIUM** | Missing PlatformInstanceReconciler Tests | `internal/controller/suite_test.go` | Open |
-| **MEDIUM** | Polling Watch Discovery | `internal/controller/platforminstance_controller.go` | Open |
+| ~~**MEDIUM**~~ | ~~Polling Watch Discovery~~ | `internal/controller/platforminstance_controller.go` | ✅ Addressed - event-driven |
 | ~~**LOW**~~ | ~~Inconsistent API Groups~~ | Multiple files | ✅ Addressed - standardized to `pequod.io` |
 
 ---
@@ -431,7 +419,7 @@ Platform names directly become CRD names without validation. Malicious names cou
 
 ### Medium-term
 
-1. Replace polling with watch-based Transform discovery
+1. ~~Replace polling with watch-based Transform discovery~~ ✅ Done - see `handleTransformChange` in `platforminstance_controller.go`
 2. ~~Add GVK index for O(1) instance lookups~~ ✅ Done - see `instanceGVKIndex` in `platforminstance_controller.go`
 3. Implement comprehensive E2E test coverage for:
    - Resource adoption

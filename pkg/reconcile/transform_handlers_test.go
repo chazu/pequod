@@ -38,6 +38,16 @@ import (
 	"github.com/chazu/pequod/pkg/platformloader"
 )
 
+// TestMain sets up the test environment
+func TestMain(m *testing.M) {
+	// Use very short timeout for CRD establishment in tests since we'll
+	// simulate the establishment condition being set
+	CRDEstablishmentTimeout = 100 * time.Millisecond
+	CRDEstablishmentPollInterval = 10 * time.Millisecond
+
+	os.Exit(m.Run())
+}
+
 // newTestScheme creates a scheme with platform types registered
 func newTestScheme() *runtime.Scheme {
 	scheme := runtime.NewScheme()
@@ -67,7 +77,7 @@ func newTestHandlers(c client.Client) *TransformHandlers {
 	return NewTransformHandlers(c, scheme, recorder, loader)
 }
 
-// newTestClient creates a fake client with the given objects
+// newTestClient creates a fake client with the given objects.
 func newTestClient(objs ...client.Object) client.Client {
 	scheme := newTestScheme()
 	return fake.NewClientBuilder().

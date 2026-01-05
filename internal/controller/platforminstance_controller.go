@@ -19,8 +19,8 @@ package controller
 import (
 	"context"
 	"sync"
-	"time"
 
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -162,19 +162,14 @@ func (r *PlatformInstanceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		r.Renderer,
 	)
 
-	// Build the controller with an initial watch on Transforms
-	// This satisfies controller-runtime's requirement for at least one watch,
-	// and allows us to react when new CRDs are generated
+	// Build the controller with a watch on Transforms
+	// When a Transform's status is updated with a GeneratedCRD, we add a watch for that CRD type
 	c, err := ctrl.NewControllerManagedBy(mgr).
 		Named("platforminstance").
-		// Watch Transforms to trigger discovery when CRDs are generated
+		// Watch Transforms to add watches when CRDs are generated (event-driven, not polling)
 		Watches(
 			&platformv1alpha1.Transform{},
-			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []ctrl.Request {
-				// When a Transform changes, we trigger discovery but don't reconcile anything specific
-				// The discovery loop will handle adding new watches
-				return nil
-			}),
+			handler.EnqueueRequestsFromMapFunc(r.handleTransformChange),
 		).
 		Build(r)
 	if err != nil {
@@ -183,50 +178,97 @@ func (r *PlatformInstanceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 	r.ctrl = c
 
-	// Add the discovery loop as a runnable to the manager
-	// This ensures proper lifecycle management
-	if err := mgr.Add(&watchDiscoveryRunnable{reconciler: r}); err != nil {
+	// Add a startup runnable for initial discovery of existing Transforms
+	// This handles Transforms that existed before the controller started
+	if err := mgr.Add(&initialDiscoveryRunnable{reconciler: r}); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-// watchDiscoveryRunnable implements manager.Runnable for the watch discovery loop
-type watchDiscoveryRunnable struct {
+// initialDiscoveryRunnable handles one-time startup discovery for existing Transforms
+type initialDiscoveryRunnable struct {
 	reconciler *PlatformInstanceReconciler
 }
 
 // Start implements manager.Runnable
-func (w *watchDiscoveryRunnable) Start(ctx context.Context) error {
-	w.reconciler.watchDiscoveryLoop(ctx)
+func (r *initialDiscoveryRunnable) Start(ctx context.Context) error {
+	logger := logf.FromContext(ctx).WithName("initial-discovery")
+
+	// Wait for cache to sync before discovery
+	if !r.reconciler.mgr.GetCache().WaitForCacheSync(ctx) {
+		logger.Error(nil, "Failed to wait for cache sync")
+		return nil
+	}
+
+	// One-time discovery for Transforms that existed before controller startup
+	r.reconciler.discoverAndWatchPlatformTypes(ctx)
 	return nil
 }
 
-// watchDiscoveryLoop periodically checks for new Transforms and adds watches
-func (r *PlatformInstanceReconciler) watchDiscoveryLoop(ctx context.Context) {
-	logger := logf.FromContext(ctx).WithName("watch-discovery")
+// handleTransformChange processes Transform changes and adds watches for new CRDs.
+// This is event-driven - called whenever a Transform is created, updated, or deleted.
+func (r *PlatformInstanceReconciler) handleTransformChange(ctx context.Context, obj client.Object) []ctrl.Request {
+	logger := logf.FromContext(ctx).WithName("transform-watch")
 
-	// Wait for cache to sync
-	if !r.mgr.GetCache().WaitForCacheSync(ctx) {
-		logger.Error(nil, "Failed to wait for cache sync")
-		return
+	tf, ok := obj.(*platformv1alpha1.Transform)
+	if !ok {
+		return nil
 	}
 
-	ticker := time.NewTicker(10 * time.Second)
-	defer ticker.Stop()
-
-	// Initial discovery
-	r.discoverAndWatchPlatformTypes(ctx)
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			r.discoverAndWatchPlatformTypes(ctx)
-		}
+	// Only process Transforms that have generated a CRD
+	if tf.Status.GeneratedCRD == nil {
+		return nil
 	}
+
+	// Parse the GVK from the generated CRD reference
+	gv, err := schema.ParseGroupVersion(tf.Status.GeneratedCRD.APIVersion)
+	if err != nil {
+		logger.Error(err, "Failed to parse GeneratedCRD APIVersion",
+			"transform", tf.Name,
+			"apiVersion", tf.Status.GeneratedCRD.APIVersion)
+		return nil
+	}
+
+	gvk := schema.GroupVersionKind{
+		Group:   gv.Group,
+		Version: gv.Version,
+		Kind:    tf.Status.GeneratedCRD.Kind,
+	}
+
+	// Fast path: check if already watching (read lock)
+	r.watchMutex.RLock()
+	watching := r.watchedGVKs[gvk]
+	r.watchMutex.RUnlock()
+
+	if watching {
+		return nil
+	}
+
+	// Ensure the CRD is established before adding a watch
+	// This prevents errors when the Transform status is updated before the CRD is ready
+	crdName := tf.Status.GeneratedCRD.Name
+	if !r.isCRDEstablished(ctx, crdName) {
+		logger.V(1).Info("CRD not yet established, skipping watch", "gvk", gvk.String(), "crd", crdName)
+		return nil
+	}
+
+	// Add watch for this GVK
+	if err := r.addWatch(ctx, gvk); err != nil {
+		logger.Error(err, "Failed to add watch for GVK", "gvk", gvk.String())
+		return nil
+	}
+
+	r.watchMutex.Lock()
+	r.watchedGVKs[gvk] = true
+	r.watchMutex.Unlock()
+
+	logger.Info("Added watch for platform type", "gvk", gvk.String(), "transform", tf.Name)
+
+	// Return nil - we don't need to reconcile anything specific.
+	// The new watch will trigger reconciles for existing instances of this CRD.
+	return nil
 }
 
 // discoverAndWatchPlatformTypes finds all Transforms with generated CRDs and adds watches
@@ -266,6 +308,13 @@ func (r *PlatformInstanceReconciler) discoverAndWatchPlatformTypes(ctx context.C
 		r.watchMutex.RUnlock()
 
 		if watching {
+			continue
+		}
+
+		// Ensure the CRD is established before adding a watch
+		crdName := tf.Status.GeneratedCRD.Name
+		if !r.isCRDEstablished(ctx, crdName) {
+			logger.V(1).Info("CRD not yet established, skipping watch", "gvk", gvk.String(), "crd", crdName)
 			continue
 		}
 
@@ -312,11 +361,31 @@ func (r *PlatformInstanceReconciler) addWatch(ctx context.Context, gvk schema.Gr
 	)
 }
 
-// RemoveWatch removes a watch for the given GVK (called when Transform is deleted)
+// RemoveWatch removes a GVK from the watched set.
+// Note: This only removes the GVK from our tracking map. Due to controller-runtime
+// limitations, the underlying informer watch cannot be dynamically removed.
+// The watch will remain active but will naturally stop receiving events once
+// the associated CRD is deleted from the cluster.
 func (r *PlatformInstanceReconciler) RemoveWatch(gvk schema.GroupVersionKind) {
 	r.watchMutex.Lock()
 	defer r.watchMutex.Unlock()
 	delete(r.watchedGVKs, gvk)
-	// Note: controller-runtime doesn't support removing watches dynamically
-	// The watch will remain but instances will 404 since the CRD is deleted
+}
+
+// isCRDEstablished checks if the CRD with the given name exists and is established.
+// This prevents attempting to watch a CRD before it's ready to serve requests.
+func (r *PlatformInstanceReconciler) isCRDEstablished(ctx context.Context, crdName string) bool {
+	crd := &apiextensionsv1.CustomResourceDefinition{}
+	if err := r.Get(ctx, types.NamespacedName{Name: crdName}, crd); err != nil {
+		return false
+	}
+
+	// Check if the CRD is established
+	for _, cond := range crd.Status.Conditions {
+		if cond.Type == apiextensionsv1.Established && cond.Status == apiextensionsv1.ConditionTrue {
+			return true
+		}
+	}
+
+	return false
 }
