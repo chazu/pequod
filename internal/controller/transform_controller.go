@@ -47,6 +47,9 @@ type TransformReconciler struct {
 // +kubebuilder:rbac:groups=platform.platform.example.com,resources=transforms/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=platform.platform.example.com,resources=transforms/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apiextensions.k8s.io,resources=customresourcedefinitions,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=rolebindings,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile handles Transform resources
 func (r *TransformReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {

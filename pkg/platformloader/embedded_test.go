@@ -2,39 +2,26 @@ package platformloader
 
 import (
 	"context"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
+	"testing/fstest"
 )
 
 func TestEmbeddedFetcher_Fetch(t *testing.T) {
-	// Create a temporary directory structure with CUE files
-	tmpDir, err := os.MkdirTemp("", "embedded-test-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	// Create a test module
-	moduleDir := filepath.Join(tmpDir, "testmodule")
-	if err := os.MkdirAll(moduleDir, 0755); err != nil {
-		t.Fatalf("Failed to create module dir: %v", err)
-	}
-
-	// Create CUE files
-	cueContent := `
+	// Create an in-memory filesystem using fstest.MapFS
+	testFS := fstest.MapFS{
+		"platform/testmodule/main.cue": &fstest.MapFile{
+			Data: []byte(`
 package testmodule
 
 name: "test"
 value: 42
-`
-	if err := os.WriteFile(filepath.Join(moduleDir, "main.cue"), []byte(cueContent), 0644); err != nil {
-		t.Fatalf("Failed to create CUE file: %v", err)
+`),
+		},
 	}
 
-	// Create fetcher with custom paths
-	fetcher := NewEmbeddedFetcherWithPaths([]string{tmpDir})
+	// Create fetcher with the test filesystem
+	fetcher := NewEmbeddedFetcher(testFS, "platform")
 
 	// Test fetch
 	result, err := fetcher.Fetch(context.Background(), "testmodule", nil)
@@ -56,22 +43,23 @@ value: 42
 }
 
 func TestEmbeddedFetcher_FetchNonexistent(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "embedded-test-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
+	testFS := fstest.MapFS{
+		"platform/existing/main.cue": &fstest.MapFile{
+			Data: []byte("test: true"),
+		},
 	}
-	defer os.RemoveAll(tmpDir)
 
-	fetcher := NewEmbeddedFetcherWithPaths([]string{tmpDir})
+	fetcher := NewEmbeddedFetcher(testFS, "platform")
 
-	_, err = fetcher.Fetch(context.Background(), "nonexistent", nil)
+	_, err := fetcher.Fetch(context.Background(), "nonexistent", nil)
 	if err == nil {
 		t.Error("Expected error for nonexistent module, got nil")
 	}
 }
 
 func TestEmbeddedFetcher_FetchEmptyRef(t *testing.T) {
-	fetcher := NewEmbeddedFetcher()
+	testFS := fstest.MapFS{}
+	fetcher := NewEmbeddedFetcher(testFS, "platform")
 
 	_, err := fetcher.Fetch(context.Background(), "", nil)
 	if err == nil {
@@ -79,34 +67,38 @@ func TestEmbeddedFetcher_FetchEmptyRef(t *testing.T) {
 	}
 }
 
+func TestEmbeddedFetcher_NilFS(t *testing.T) {
+	fetcher := NewEmbeddedFetcher(nil, "platform")
+
+	_, err := fetcher.Fetch(context.Background(), "testmodule", nil)
+	if err == nil {
+		t.Error("Expected error for nil filesystem, got nil")
+	}
+}
+
 func TestEmbeddedFetcher_Type(t *testing.T) {
-	fetcher := NewEmbeddedFetcher()
+	fetcher := NewEmbeddedFetcher(nil, "platform")
 	if fetcher.Type() != "embedded" {
 		t.Errorf("Expected type 'embedded', got %q", fetcher.Type())
 	}
 }
 
 func TestEmbeddedFetcher_ListModules(t *testing.T) {
-	// Create a temporary directory structure
-	tmpDir, err := os.MkdirTemp("", "embedded-test-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
+	testFS := fstest.MapFS{
+		"platform/module1/main.cue":  &fstest.MapFile{Data: []byte("test: 1")},
+		"platform/module2/main.cue":  &fstest.MapFile{Data: []byte("test: 2")},
+		"platform/.hidden/main.cue":  &fstest.MapFile{Data: []byte("hidden: true")},
+		"platform/notamodule.txt":    &fstest.MapFile{Data: []byte("not a module")},
 	}
-	defer os.RemoveAll(tmpDir)
 
-	// Create module directories
-	os.MkdirAll(filepath.Join(tmpDir, "module1"), 0755)
-	os.MkdirAll(filepath.Join(tmpDir, "module2"), 0755)
-	os.MkdirAll(filepath.Join(tmpDir, ".hidden"), 0755) // Hidden dir should be excluded
-
-	fetcher := NewEmbeddedFetcherWithPaths([]string{tmpDir})
+	fetcher := NewEmbeddedFetcher(testFS, "platform")
 
 	modules, err := fetcher.ListEmbeddedModules()
 	if err != nil {
 		t.Fatalf("ListEmbeddedModules failed: %v", err)
 	}
 
-	// Should find module1 and module2 but not .hidden
+	// Should find module1 and module2 but not .hidden (hidden) or notamodule.txt (file)
 	if len(modules) != 2 {
 		t.Errorf("Expected 2 modules, got %d: %v", len(modules), modules)
 	}
@@ -128,21 +120,13 @@ func TestEmbeddedFetcher_ListModules(t *testing.T) {
 }
 
 func TestEmbeddedFetcher_MultipleCUEFiles(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "embedded-test-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
+	testFS := fstest.MapFS{
+		"platform/multi/schema.cue": &fstest.MapFile{Data: []byte("schema: true")},
+		"platform/multi/render.cue": &fstest.MapFile{Data: []byte("render: true")},
+		"platform/multi/policy.cue": &fstest.MapFile{Data: []byte("policy: true")},
 	}
-	defer os.RemoveAll(tmpDir)
 
-	moduleDir := filepath.Join(tmpDir, "multi")
-	os.MkdirAll(moduleDir, 0755)
-
-	// Create multiple CUE files
-	os.WriteFile(filepath.Join(moduleDir, "schema.cue"), []byte("schema: true"), 0644)
-	os.WriteFile(filepath.Join(moduleDir, "render.cue"), []byte("render: true"), 0644)
-	os.WriteFile(filepath.Join(moduleDir, "policy.cue"), []byte("policy: true"), 0644)
-
-	fetcher := NewEmbeddedFetcherWithPaths([]string{tmpDir})
+	fetcher := NewEmbeddedFetcher(testFS, "platform")
 
 	result, err := fetcher.Fetch(context.Background(), "multi", nil)
 	if err != nil {
@@ -162,49 +146,91 @@ func TestEmbeddedFetcher_MultipleCUEFiles(t *testing.T) {
 	}
 }
 
-func TestReadCUEFilesFromDir(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "cue-read-test-*")
+func TestEmbeddedFetcher_NestedDirectories(t *testing.T) {
+	testFS := fstest.MapFS{
+		"platform/nested/main.cue":             &fstest.MapFile{Data: []byte("main: true")},
+		"platform/nested/subdir/nested.cue":    &fstest.MapFile{Data: []byte("nested: true")},
+		"platform/nested/.hidden/hidden.cue":   &fstest.MapFile{Data: []byte("hidden: true")},
+	}
+
+	fetcher := NewEmbeddedFetcher(testFS, "platform")
+
+	result, err := fetcher.Fetch(context.Background(), "nested", nil)
 	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	// Create CUE file
-	os.WriteFile(filepath.Join(tmpDir, "test.cue"), []byte("test: 1"), 0644)
-
-	// Create non-CUE file (should be ignored)
-	os.WriteFile(filepath.Join(tmpDir, "readme.txt"), []byte("readme"), 0644)
-
-	// Create hidden directory with CUE file (should be skipped)
-	hiddenDir := filepath.Join(tmpDir, ".hidden")
-	os.MkdirAll(hiddenDir, 0755)
-	os.WriteFile(filepath.Join(hiddenDir, "hidden.cue"), []byte("hidden: true"), 0644)
-
-	content, err := readCUEFilesFromDir(tmpDir)
-	if err != nil {
-		t.Fatalf("readCUEFilesFromDir failed: %v", err)
+		t.Fatalf("Fetch failed: %v", err)
 	}
 
-	if !strings.Contains(string(content), "test:") {
-		t.Error("Should contain test.cue content")
+	content := string(result.Content)
+	if !strings.Contains(content, "main:") {
+		t.Error("Missing main.cue content")
 	}
-	if strings.Contains(string(content), "hidden:") {
-		t.Error("Should not contain hidden directory content")
+	if !strings.Contains(content, "nested:") {
+		t.Error("Missing nested subdirectory content")
 	}
-	if strings.Contains(string(content), "readme") {
-		t.Error("Should not contain non-CUE files")
+	if strings.Contains(content, "hidden:") {
+		t.Error("Should not include hidden directory content")
 	}
 }
 
-func TestReadCUEFilesFromDir_Empty(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "cue-read-test-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
+func TestEmbeddedFetcher_NonCUEFilesIgnored(t *testing.T) {
+	testFS := fstest.MapFS{
+		"platform/mixed/main.cue":     &fstest.MapFile{Data: []byte("cue: true")},
+		"platform/mixed/readme.txt":   &fstest.MapFile{Data: []byte("readme content")},
+		"platform/mixed/config.json":  &fstest.MapFile{Data: []byte(`{"json": true}`)},
 	}
-	defer os.RemoveAll(tmpDir)
 
-	_, err = readCUEFilesFromDir(tmpDir)
+	fetcher := NewEmbeddedFetcher(testFS, "platform")
+
+	result, err := fetcher.Fetch(context.Background(), "mixed", nil)
+	if err != nil {
+		t.Fatalf("Fetch failed: %v", err)
+	}
+
+	content := string(result.Content)
+	if !strings.Contains(content, "cue:") {
+		t.Error("Should contain CUE file content")
+	}
+	if strings.Contains(content, "readme") {
+		t.Error("Should not contain txt file content")
+	}
+	if strings.Contains(content, "json") {
+		t.Error("Should not contain json file content")
+	}
+}
+
+func TestEmbeddedFetcher_EmptyModule(t *testing.T) {
+	// Module directory exists but has no .cue files
+	testFS := fstest.MapFS{
+		"platform/empty/readme.txt": &fstest.MapFile{Data: []byte("no cue files")},
+	}
+
+	fetcher := NewEmbeddedFetcher(testFS, "platform")
+
+	_, err := fetcher.Fetch(context.Background(), "empty", nil)
 	if err == nil {
-		t.Error("Expected error for empty directory, got nil")
+		t.Error("Expected error for empty module (no .cue files), got nil")
+	}
+}
+
+func TestEmbeddedFetcher_DigestConsistency(t *testing.T) {
+	testFS := fstest.MapFS{
+		"platform/consistent/main.cue": &fstest.MapFile{Data: []byte("test: true")},
+	}
+
+	fetcher := NewEmbeddedFetcher(testFS, "platform")
+
+	// Fetch twice and verify digest is consistent
+	result1, err := fetcher.Fetch(context.Background(), "consistent", nil)
+	if err != nil {
+		t.Fatalf("First fetch failed: %v", err)
+	}
+
+	result2, err := fetcher.Fetch(context.Background(), "consistent", nil)
+	if err != nil {
+		t.Fatalf("Second fetch failed: %v", err)
+	}
+
+	if result1.Digest != result2.Digest {
+		t.Errorf("Digests should be consistent: %q != %q", result1.Digest, result2.Digest)
 	}
 }

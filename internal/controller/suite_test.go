@@ -26,6 +26,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	rbacv1 "k8s.io/api/rbac/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
@@ -37,6 +38,7 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	platformv1alpha1 "github.com/chazu/pequod/api/v1alpha1"
+	cuembed "github.com/chazu/pequod/cue"
 	"github.com/chazu/pequod/pkg/platformloader"
 	// +kubebuilder:scaffold:imports
 )
@@ -68,6 +70,9 @@ var _ = BeforeSuite(func() {
 	Expect(err).NotTo(HaveOccurred())
 
 	err = apiextensionsv1.AddToScheme(scheme.Scheme)
+	Expect(err).NotTo(HaveOccurred())
+
+	err = rbacv1.AddToScheme(scheme.Scheme)
 	Expect(err).NotTo(HaveOccurred())
 
 	// +kubebuilder:scaffold:scheme
@@ -109,8 +114,12 @@ var _ = BeforeSuite(func() {
 	}).SetupWithManager(k8sManager)
 	Expect(err).ToNot(HaveOccurred())
 
-	// Setup Transform controller
-	loader := platformloader.NewLoader()
+	// Setup Transform controller with embedded CUE modules
+	loader := platformloader.NewLoaderWithConfig(platformloader.LoaderConfig{
+		K8sClient:       k8sManager.GetClient(),
+		EmbeddedFS:      cuembed.PlatformFS,
+		EmbeddedRootDir: cuembed.PlatformDir,
+	})
 
 	err = (&TransformReconciler{
 		Client:         k8sManager.GetClient(),

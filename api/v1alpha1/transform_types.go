@@ -84,6 +84,48 @@ type ResolvedCueReference struct {
 	FetchedAt *metav1.Time `json:"fetchedAt,omitempty"`
 }
 
+// RBACScope defines where RBAC resources are created for a Transform
+// +kubebuilder:validation:Enum=Cluster;Namespace
+type RBACScope string
+
+const (
+	// RBACScopeCluster creates a ClusterRole aggregated into the manager role
+	RBACScopeCluster RBACScope = "Cluster"
+
+	// RBACScopeNamespace creates a Role and RoleBinding in the Transform's namespace
+	RBACScopeNamespace RBACScope = "Namespace"
+)
+
+// ManagedResource defines a Kubernetes resource type that a Transform manages
+type ManagedResource struct {
+	// APIGroup is the API group of the resource (e.g., "apps", "" for core)
+	// +optional
+	APIGroup string `json:"apiGroup,omitempty"`
+
+	// Resources is the list of resources in this API group (e.g., ["deployments", "statefulsets"])
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinItems=1
+	Resources []string `json:"resources"`
+}
+
+// GeneratedRBACReference contains information about generated RBAC resources
+type GeneratedRBACReference struct {
+	// ClusterRoleName is the name of the generated ClusterRole (if scope=Cluster)
+	// +optional
+	ClusterRoleName string `json:"clusterRoleName,omitempty"`
+
+	// RoleName is the name of the generated Role (if scope=Namespace)
+	// +optional
+	RoleName string `json:"roleName,omitempty"`
+
+	// RoleBindingName is the name of the generated RoleBinding (if scope=Namespace)
+	// +optional
+	RoleBindingName string `json:"roleBindingName,omitempty"`
+
+	// RuleCount is the number of policy rules in the generated role
+	RuleCount int `json:"ruleCount"`
+}
+
 // AdoptMode defines how resources are selected for adoption
 // +kubebuilder:validation:Enum=Explicit;LabelSelector
 type AdoptMode string
@@ -177,6 +219,20 @@ type TransformSpec struct {
 	// Categories are optional categories for the generated CRD
 	// +optional
 	Categories []string `json:"categories,omitempty"`
+
+	// ManagedResources declares the Kubernetes resource types that this
+	// Transform's CUE template will create. Used to generate scoped RBAC.
+	// If empty, the Transform will not generate any RBAC rules.
+	// +optional
+	ManagedResources []ManagedResource `json:"managedResources,omitempty"`
+
+	// RBACScope determines whether to create cluster-wide or namespace-scoped RBAC.
+	// Cluster: Creates a ClusterRole aggregated into the manager's permissions.
+	// Namespace: Creates a Role and RoleBinding in the Transform's namespace.
+	// Defaults to Cluster if not specified.
+	// +kubebuilder:default=Cluster
+	// +optional
+	RBACScope RBACScope `json:"rbacScope,omitempty"`
 }
 
 // TransformPhase represents the current phase of a Transform
@@ -221,6 +277,10 @@ type TransformStatus struct {
 	// +optional
 	GeneratedCRD *GeneratedCRDReference `json:"generatedCRD,omitempty"`
 
+	// GeneratedRBAC contains information about the generated RBAC resources
+	// +optional
+	GeneratedRBAC *GeneratedRBACReference `json:"generatedRBAC,omitempty"`
+
 	// ResolvedCueRef contains the resolved CUE module reference
 	// +optional
 	ResolvedCueRef *ResolvedCueReference `json:"resolvedCueRef,omitempty"`
@@ -230,6 +290,7 @@ type TransformStatus struct {
 	// - "CueFetched": CUE module fetched successfully
 	// - "SchemaExtracted": Input schema extracted from CUE
 	// - "CRDGenerated": CRD generated and applied to cluster
+	// - "RBACConfigured": RBAC resources generated and applied
 	// +listType=map
 	// +listMapKey=type
 	// +optional

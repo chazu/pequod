@@ -3,10 +3,14 @@ package platformloader
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"testing"
 
+	"cuelang.org/go/cue/cuecontext"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+
+	cuembed "github.com/chazu/pequod/cue"
 )
 
 func TestNewRenderer(t *testing.T) {
@@ -22,8 +26,29 @@ func TestNewRenderer(t *testing.T) {
 	}
 }
 
+// createTestLoader creates a loader with embedded filesystem for testing
+// It uses the actual embedded CUE modules from the project
+func createTestLoader() *Loader {
+	// Create a loader with embedded filesystem and CUE context
+	loader := &Loader{
+		ctx:   cuecontext.New(),
+		cache: NewCache(),
+	}
+
+	// Create fetcher registry with embedded filesystem
+	cacheDir := os.TempDir()
+	loader.fetchers = NewFetcherRegistry(FetcherRegistryConfig{
+		K8sClient:       nil, // No K8s client for testing
+		CacheDir:        cacheDir,
+		EmbeddedFS:      cuembed.PlatformFS,
+		EmbeddedRootDir: cuembed.PlatformDir,
+	})
+
+	return loader
+}
+
 func TestRenderTransformWithCueRef(t *testing.T) {
-	loader := NewLoader()
+	loader := createTestLoader()
 	renderer := NewRenderer(loader)
 	ctx := context.Background()
 
@@ -130,7 +155,7 @@ func TestRenderTransformWithCueRef(t *testing.T) {
 }
 
 func TestRenderTransformWithDefaultReplicas(t *testing.T) {
-	loader := NewLoader()
+	loader := createTestLoader()
 	renderer := NewRenderer(loader)
 	ctx := context.Background()
 

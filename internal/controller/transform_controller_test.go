@@ -21,6 +21,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	rbacv1 "k8s.io/api/rbac/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -243,6 +244,128 @@ var _ = Describe("Transform Controller", Ordered, func() {
 				err := k8sClient.Get(ctx, types.NamespacedName{Name: crdName}, crd)
 				return client.IgnoreNotFound(err) == nil && err != nil
 			}, timeout, interval).Should(BeTrue())
+		})
+
+		It("should create a ClusterRole when Transform has managedResources", func() {
+			By("Creating a Transform with managedResources and Cluster scope")
+
+			rbacTransformName := "rbac-test-transform"
+			rbacNamespacedName := types.NamespacedName{Name: rbacTransformName, Namespace: namespace}
+
+			tf := &platformv1alpha1.Transform{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      rbacTransformName,
+					Namespace: namespace,
+				},
+				Spec: platformv1alpha1.TransformSpec{
+					CueRef: platformv1alpha1.CueReference{
+						Type: platformv1alpha1.CueRefTypeEmbedded,
+						Ref:  "webservice",
+					},
+					Group:     "apps.example.com",
+					Version:   "v1alpha1",
+					RBACScope: platformv1alpha1.RBACScopeCluster,
+					ManagedResources: []platformv1alpha1.ManagedResource{
+						{
+							APIGroup:  "apps",
+							Resources: []string{"deployments"},
+						},
+						{
+							APIGroup:  "",
+							Resources: []string{"services", "configmaps"},
+						},
+					},
+				},
+			}
+
+			Expect(k8sClient.Create(ctx, tf)).To(Succeed())
+
+			By("Waiting for the ClusterRole to be created")
+			expectedCRName := "pequod:transform:default.rbac-test-transform"
+			Eventually(func() bool {
+				cr := &rbacv1.ClusterRole{}
+				err := k8sClient.Get(ctx, types.NamespacedName{Name: expectedCRName}, cr)
+				return err == nil
+			}, timeout, interval).Should(BeTrue())
+
+			By("Verifying ClusterRole has correct structure")
+			cr := &rbacv1.ClusterRole{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: expectedCRName}, cr)).To(Succeed())
+
+			// Verify aggregation label
+			Expect(cr.Labels).To(HaveKeyWithValue("pequod.io/aggregate-to-manager", "true"))
+
+			// Verify transform labels
+			Expect(cr.Labels).To(HaveKeyWithValue("platform.pequod.io/transform", rbacTransformName))
+			Expect(cr.Labels).To(HaveKeyWithValue("platform.pequod.io/transform-namespace", namespace))
+
+			// Verify rules
+			Expect(cr.Rules).To(HaveLen(2))
+
+			By("Verifying Transform status includes RBAC reference")
+			Eventually(func() bool {
+				err := k8sClient.Get(ctx, rbacNamespacedName, tf)
+				if err != nil {
+					return false
+				}
+				return tf.Status.GeneratedRBAC != nil &&
+					tf.Status.GeneratedRBAC.ClusterRoleName == expectedCRName &&
+					tf.Status.GeneratedRBAC.RuleCount == 2
+			}, timeout, interval).Should(BeTrue())
+
+			By("Cleaning up the Transform and ClusterRole")
+			Expect(k8sClient.Delete(ctx, tf)).To(Succeed())
+			Eventually(func() bool {
+				err := k8sClient.Get(ctx, types.NamespacedName{Name: expectedCRName}, cr)
+				return client.IgnoreNotFound(err) == nil && err != nil
+			}, timeout, interval).Should(BeTrue())
+		})
+
+		It("should not create RBAC when Transform has no managedResources", func() {
+			By("Creating a Transform without managedResources")
+
+			noRbacTransformName := "no-rbac-transform"
+			noRbacNamespacedName := types.NamespacedName{Name: noRbacTransformName, Namespace: namespace}
+
+			tf := &platformv1alpha1.Transform{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      noRbacTransformName,
+					Namespace: namespace,
+				},
+				Spec: platformv1alpha1.TransformSpec{
+					CueRef: platformv1alpha1.CueReference{
+						Type: platformv1alpha1.CueRefTypeEmbedded,
+						Ref:  "webservice",
+					},
+					Group:   "apps.example.com",
+					Version: "v1alpha1",
+					// No ManagedResources
+				},
+			}
+
+			Expect(k8sClient.Create(ctx, tf)).To(Succeed())
+
+			By("Waiting for the Transform to be ready")
+			Eventually(func() bool {
+				err := k8sClient.Get(ctx, noRbacNamespacedName, tf)
+				if err != nil {
+					return false
+				}
+				return tf.Status.Phase == platformv1alpha1.TransformPhaseReady
+			}, timeout, interval).Should(BeTrue())
+
+			By("Verifying no ClusterRole was created")
+			expectedCRName := "pequod:transform:default.no-rbac-transform"
+			cr := &rbacv1.ClusterRole{}
+			err := k8sClient.Get(ctx, types.NamespacedName{Name: expectedCRName}, cr)
+			Expect(client.IgnoreNotFound(err)).To(Succeed())
+			Expect(err).To(HaveOccurred()) // Should be NotFound
+
+			By("Verifying Transform status has nil GeneratedRBAC")
+			Expect(tf.Status.GeneratedRBAC).To(BeNil())
+
+			By("Cleaning up")
+			Expect(k8sClient.Delete(ctx, tf)).To(Succeed())
 		})
 	})
 })

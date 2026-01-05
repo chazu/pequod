@@ -484,6 +484,78 @@ spec:
 			}, 3*time.Minute, 5*time.Second).Should(Succeed())
 		})
 
+		It("should create ClusterRole for Transform with managedResources", func() {
+			By("creating a Transform resource with managedResources")
+			rbacTransformName := "webservice-rbac"
+			transformYAML := fmt.Sprintf(`
+apiVersion: platform.platform.example.com/v1alpha1
+kind: Transform
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  cueRef:
+    type: embedded
+    ref: webservice
+  group: apps.example.com
+  version: v1alpha1
+  rbacScope: Cluster
+  managedResources:
+    - apiGroup: apps
+      resources:
+        - deployments
+    - apiGroup: ""
+      resources:
+        - services
+        - configmaps
+`, rbacTransformName, testNamespace)
+
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(transformYAML)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create Transform with managedResources")
+
+			By("verifying ClusterRole was created")
+			expectedCRName := fmt.Sprintf("pequod:transform:%s.%s", testNamespace, rbacTransformName)
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "clusterrole", expectedCRName)
+				_, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred(), "ClusterRole should be created")
+			}, 2*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("verifying ClusterRole has aggregation label")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "clusterrole", expectedCRName,
+					"-o", "jsonpath={.metadata.labels['pequod\\.io/aggregate-to-manager']}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("true"), "ClusterRole should have aggregation label")
+			}, time.Minute, 5*time.Second).Should(Succeed())
+
+			By("verifying Transform status includes GeneratedRBAC")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "transform", rbacTransformName, "-n", testNamespace,
+					"-o", "jsonpath={.status.generatedRBAC.clusterRoleName}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal(expectedCRName), "Transform status should reference ClusterRole")
+			}, 2*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("cleaning up Transform and ClusterRole")
+			cmd = exec.Command("kubectl", "delete", "transform", rbacTransformName, "-n", testNamespace)
+			_, _ = utils.Run(cmd)
+
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "clusterrole", expectedCRName)
+				_, err := utils.Run(cmd)
+				g.Expect(err).To(HaveOccurred(), "ClusterRole should be deleted")
+			}, 2*time.Minute, 5*time.Second).Should(Succeed())
+
+			// Also clean up the generated CRD
+			cmd = exec.Command("kubectl", "delete", "crd", "webservice-rbacs.apps.example.com", "--ignore-not-found=true")
+			_, _ = utils.Run(cmd)
+		})
+
 		It("should handle platform instance deletion", func() {
 			By("creating a Transform resource")
 			transformYAML := fmt.Sprintf(`

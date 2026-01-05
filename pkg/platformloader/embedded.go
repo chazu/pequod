@@ -3,38 +3,30 @@ package platformloader
 import (
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
+	"io/fs"
 	"strings"
 
 	"github.com/cespare/xxhash/v2"
 	corev1 "k8s.io/api/core/v1"
 )
 
-// EmbeddedFetcher handles CUE modules embedded/bundled with the operator
-// In development, it reads from the filesystem
-// In production, this would use go:embed with files copied during build
+// EmbeddedFetcher handles CUE modules embedded with the operator using go:embed.
+// It reads from an fs.FS interface, which can be either an embed.FS for production
+// or an os.DirFS/fstest.MapFS for testing.
 type EmbeddedFetcher struct {
-	// searchPaths are paths to search for the cue/platform directory
-	searchPaths []string
+	// fs is the filesystem containing embedded modules
+	fs fs.FS
+	// rootDir is the directory within fs that contains the platform modules
+	rootDir string
 }
 
-// NewEmbeddedFetcher creates a new embedded fetcher
-func NewEmbeddedFetcher() *EmbeddedFetcher {
+// NewEmbeddedFetcher creates a new embedded fetcher with the given filesystem.
+// fs should be an embed.FS or compatible fs.FS implementation.
+// rootDir is the directory within fs containing platform modules (e.g., "platform").
+func NewEmbeddedFetcher(filesystem fs.FS, rootDir string) *EmbeddedFetcher {
 	return &EmbeddedFetcher{
-		searchPaths: []string{
-			"cue/platform",
-			"../../cue/platform",
-			"../../../cue/platform",
-			"/app/cue/platform", // Common container path
-		},
-	}
-}
-
-// NewEmbeddedFetcherWithPaths creates an embedded fetcher with custom search paths
-func NewEmbeddedFetcherWithPaths(paths []string) *EmbeddedFetcher {
-	return &EmbeddedFetcher{
-		searchPaths: paths,
+		fs:      filesystem,
+		rootDir: rootDir,
 	}
 }
 
@@ -43,7 +35,7 @@ func (f *EmbeddedFetcher) Type() string {
 	return "embedded"
 }
 
-// Fetch retrieves a CUE module from the embedded/bundled filesystem
+// Fetch retrieves a CUE module from the embedded filesystem.
 // ref is the module name (e.g., "webservice", "database")
 // pullSecret is ignored for embedded fetches
 func (f *EmbeddedFetcher) Fetch(ctx context.Context, ref string, _ *corev1.Secret) (*FetchResult, error) {
@@ -51,24 +43,27 @@ func (f *EmbeddedFetcher) Fetch(ctx context.Context, ref string, _ *corev1.Secre
 		return nil, fmt.Errorf("embedded module reference is empty")
 	}
 
-	// Find the platform directory
-	basePath, err := f.findPlatformPath()
-	if err != nil {
-		return nil, fmt.Errorf("failed to find embedded modules: %w", err)
+	if f.fs == nil {
+		return nil, fmt.Errorf("embedded filesystem not initialized")
 	}
 
-	// Build the module path
-	modulePath := filepath.Join(basePath, ref)
+	// Build the module path within the embedded filesystem
+	modulePath := f.rootDir + "/" + ref
 
-	// Check if the module exists
-	if _, err := os.Stat(modulePath); os.IsNotExist(err) {
-		return nil, fmt.Errorf("embedded module %s not found at %s", ref, modulePath)
+	// Check if the module directory exists
+	entries, err := fs.ReadDir(f.fs, modulePath)
+	if err != nil {
+		return nil, fmt.Errorf("embedded module %q not found: %w", ref, err)
 	}
 
-	// Read all .cue files from the module directory
-	content, err := readCUEFilesFromDir(modulePath)
+	if len(entries) == 0 {
+		return nil, fmt.Errorf("embedded module %q is empty", ref)
+	}
+
+	// Read all .cue files from the module directory (recursively)
+	content, err := f.readCUEFiles(modulePath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read embedded module %s: %w", ref, err)
+		return nil, fmt.Errorf("failed to read embedded module %q: %w", ref, err)
 	}
 
 	// Compute a content-based digest
@@ -81,28 +76,20 @@ func (f *EmbeddedFetcher) Fetch(ctx context.Context, ref string, _ *corev1.Secre
 	}, nil
 }
 
-// findPlatformPath locates the cue/platform directory
-func (f *EmbeddedFetcher) findPlatformPath() (string, error) {
-	for _, path := range f.searchPaths {
-		if info, err := os.Stat(path); err == nil && info.IsDir() {
-			return path, nil
-		}
-	}
-	return "", fmt.Errorf("could not find cue/platform directory in any of: %v", f.searchPaths)
-}
+// readCUEFiles reads all .cue files from the given directory recursively
+// It merges them into a single CUE source, handling package declarations
+func (f *EmbeddedFetcher) readCUEFiles(dir string) ([]byte, error) {
+	var files [][]byte
+	var packageName string
 
-// readCUEFilesFromDir reads all .cue files from a directory
-func readCUEFilesFromDir(dir string) ([]byte, error) {
-	var content []byte
-
-	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+	err := fs.WalkDir(f.fs, dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 
 		// Skip hidden directories (like .git)
 		if d.IsDir() && strings.HasPrefix(d.Name(), ".") {
-			return filepath.SkipDir
+			return fs.SkipDir
 		}
 
 		// Skip directories
@@ -116,16 +103,12 @@ func readCUEFilesFromDir(dir string) ([]byte, error) {
 		}
 
 		// Read the file
-		data, err := os.ReadFile(path)
+		data, err := fs.ReadFile(f.fs, path)
 		if err != nil {
 			return fmt.Errorf("failed to read %s: %w", path, err)
 		}
 
-		if len(content) > 0 {
-			content = append(content, '\n')
-		}
-		content = append(content, data...)
-
+		files = append(files, data)
 		return nil
 	})
 
@@ -133,21 +116,66 @@ func readCUEFilesFromDir(dir string) ([]byte, error) {
 		return nil, err
 	}
 
-	if len(content) == 0 {
+	if len(files) == 0 {
 		return nil, fmt.Errorf("no .cue files found in %s", dir)
 	}
 
-	return content, nil
+	// Merge files, handling package declarations
+	// CUE allows one package declaration per compilation unit
+	// We extract and remove package declarations from all files, then add one at the top
+	var mergedContent []byte
+	for _, fileData := range files {
+		// Extract package name if present, and remove the package line
+		cleaned, pkg := stripPackageDeclaration(fileData)
+		if pkg != "" && packageName == "" {
+			packageName = pkg
+		}
+		if len(mergedContent) > 0 {
+			mergedContent = append(mergedContent, '\n')
+		}
+		mergedContent = append(mergedContent, cleaned...)
+	}
+
+	// Prepend the package declaration if found
+	if packageName != "" {
+		header := []byte("package " + packageName + "\n\n")
+		mergedContent = append(header, mergedContent...)
+	}
+
+	return mergedContent, nil
+}
+
+// stripPackageDeclaration removes the package declaration from CUE content
+// and returns the cleaned content and the package name (if found)
+func stripPackageDeclaration(content []byte) ([]byte, string) {
+	lines := strings.Split(string(content), "\n")
+	var result []string
+	var packageName string
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "package ") {
+			// Extract package name
+			parts := strings.Fields(trimmed)
+			if len(parts) >= 2 {
+				packageName = parts[1]
+			}
+			// Skip this line (don't add to result)
+			continue
+		}
+		result = append(result, line)
+	}
+
+	return []byte(strings.Join(result, "\n")), packageName
 }
 
 // ListEmbeddedModules returns a list of available embedded modules
 func (f *EmbeddedFetcher) ListEmbeddedModules() ([]string, error) {
-	basePath, err := f.findPlatformPath()
-	if err != nil {
-		return nil, err
+	if f.fs == nil {
+		return nil, fmt.Errorf("embedded filesystem not initialized")
 	}
 
-	entries, err := os.ReadDir(basePath)
+	entries, err := fs.ReadDir(f.fs, f.rootDir)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list embedded modules: %w", err)
 	}

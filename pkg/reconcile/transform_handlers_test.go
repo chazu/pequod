@@ -18,9 +18,11 @@ package reconcile
 
 import (
 	"context"
+	"os"
 	"testing"
 	"time"
 
+	rbacv1 "k8s.io/api/rbac/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -32,6 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	platformv1alpha1 "github.com/chazu/pequod/api/v1alpha1"
+	cuembed "github.com/chazu/pequod/cue"
 	"github.com/chazu/pequod/pkg/platformloader"
 )
 
@@ -40,13 +43,25 @@ func newTestScheme() *runtime.Scheme {
 	scheme := runtime.NewScheme()
 	_ = platformv1alpha1.AddToScheme(scheme)
 	_ = apiextensionsv1.AddToScheme(scheme)
+	_ = rbacv1.AddToScheme(scheme)
 	return scheme
+}
+
+// createTestLoader creates a loader with embedded filesystem for testing
+func createTestLoader() *platformloader.Loader {
+	cacheDir := os.TempDir()
+	return platformloader.NewLoaderWithConfig(platformloader.LoaderConfig{
+		CacheDir:        cacheDir,
+		K8sClient:       nil, // No K8s client needed for embedded modules
+		EmbeddedFS:      cuembed.PlatformFS,
+		EmbeddedRootDir: cuembed.PlatformDir,
+	})
 }
 
 // newTestHandlers creates handlers for testing
 func newTestHandlers(c client.Client) *TransformHandlers {
 	scheme := newTestScheme()
-	loader := platformloader.NewLoader()
+	loader := createTestLoader()
 	recorder := record.NewFakeRecorder(100)
 
 	return NewTransformHandlers(c, scheme, recorder, loader)
@@ -330,7 +345,7 @@ func TestTransformReconciler_Reconcile(t *testing.T) {
 
 	scheme := newTestScheme()
 	c := newTestClient(tf)
-	loader := platformloader.NewLoader()
+	loader := createTestLoader()
 	recorder := record.NewFakeRecorder(100)
 
 	reconciler := NewTransformReconciler(c, scheme, loader)
@@ -382,7 +397,7 @@ func TestTransformHandlers_EventRecording(t *testing.T) {
 
 	c := newTestClient(tf)
 	scheme := newTestScheme()
-	loader := platformloader.NewLoader()
+	loader := createTestLoader()
 	recorder := record.NewFakeRecorder(100)
 
 	handlers := NewTransformHandlers(c, scheme, recorder, loader)
@@ -569,5 +584,349 @@ func TestTransformHandlers_ConcurrentReconciliation_DifferentResources(t *testin
 
 	if len(crdList.Items) != len(transforms) {
 		t.Errorf("expected %d CRDs, got %d", len(transforms), len(crdList.Items))
+	}
+}
+
+// ============================================================================
+// RBAC Generation Tests
+// ============================================================================
+
+func TestTransformHandlers_Reconcile_GeneratesClusterRole(t *testing.T) {
+	// Setup: Transform with managedResources and Cluster scope
+	tf := &platformv1alpha1.Transform{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "webservice",
+			Namespace:  "default",
+			Finalizers: []string{TransformFinalizer},
+			UID:        "test-uid-rbac-cluster",
+		},
+		Spec: platformv1alpha1.TransformSpec{
+			CueRef: platformv1alpha1.CueReference{
+				Type: platformv1alpha1.CueRefTypeEmbedded,
+				Ref:  "webservice",
+			},
+			Group:     "apps.example.com",
+			Version:   "v1alpha1",
+			RBACScope: platformv1alpha1.RBACScopeCluster,
+			ManagedResources: []platformv1alpha1.ManagedResource{
+				{
+					APIGroup:  "apps",
+					Resources: []string{"deployments"},
+				},
+				{
+					APIGroup:  "",
+					Resources: []string{"services", "configmaps"},
+				},
+			},
+		},
+	}
+
+	c := newTestClient(tf)
+	handlers := newTestHandlers(c)
+
+	// Act
+	result, err := handlers.Reconcile(context.Background(), types.NamespacedName{
+		Name:      "webservice",
+		Namespace: "default",
+	})
+
+	// Assert
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if result.Requeue {
+		t.Error("expected no requeue after successful reconciliation")
+	}
+
+	// Verify ClusterRole was created
+	crList := &rbacv1.ClusterRoleList{}
+	if err := c.List(context.Background(), crList); err != nil {
+		t.Fatalf("failed to list ClusterRoles: %v", err)
+	}
+	if len(crList.Items) != 1 {
+		t.Errorf("expected 1 ClusterRole, got %d", len(crList.Items))
+	}
+
+	cr := &crList.Items[0]
+
+	// Verify ClusterRole name follows naming convention
+	expectedName := "pequod:transform:default.webservice"
+	if cr.Name != expectedName {
+		t.Errorf("expected ClusterRole name %q, got %q", expectedName, cr.Name)
+	}
+
+	// Verify aggregation label
+	if cr.Labels["pequod.io/aggregate-to-manager"] != "true" {
+		t.Error("expected aggregation label to be set")
+	}
+
+	// Verify rules
+	if len(cr.Rules) != 2 {
+		t.Errorf("expected 2 rules, got %d", len(cr.Rules))
+	}
+
+	// Verify Transform status was updated with RBAC reference
+	updated := &platformv1alpha1.Transform{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "webservice", Namespace: "default"}, updated); err != nil {
+		t.Fatalf("failed to get updated transform: %v", err)
+	}
+	if updated.Status.GeneratedRBAC == nil {
+		t.Error("expected GeneratedRBAC to be set in status")
+	} else {
+		if updated.Status.GeneratedRBAC.ClusterRoleName != expectedName {
+			t.Errorf("expected ClusterRoleName %q in status, got %q", expectedName, updated.Status.GeneratedRBAC.ClusterRoleName)
+		}
+		if updated.Status.GeneratedRBAC.RuleCount != 2 {
+			t.Errorf("expected RuleCount 2 in status, got %d", updated.Status.GeneratedRBAC.RuleCount)
+		}
+	}
+}
+
+func TestTransformHandlers_Reconcile_GeneratesNamespacedRole(t *testing.T) {
+	// Setup: Transform with managedResources and Namespace scope
+	tf := &platformv1alpha1.Transform{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "myapp",
+			Namespace:  "team-a",
+			Finalizers: []string{TransformFinalizer},
+			UID:        "test-uid-rbac-ns",
+		},
+		Spec: platformv1alpha1.TransformSpec{
+			CueRef: platformv1alpha1.CueReference{
+				Type: platformv1alpha1.CueRefTypeEmbedded,
+				Ref:  "webservice",
+			},
+			Group:     "apps.example.com",
+			Version:   "v1alpha1",
+			RBACScope: platformv1alpha1.RBACScopeNamespace,
+			ManagedResources: []platformv1alpha1.ManagedResource{
+				{
+					APIGroup:  "apps",
+					Resources: []string{"deployments"},
+				},
+			},
+		},
+	}
+
+	c := newTestClient(tf)
+	handlers := newTestHandlers(c)
+
+	// Act
+	result, err := handlers.Reconcile(context.Background(), types.NamespacedName{
+		Name:      "myapp",
+		Namespace: "team-a",
+	})
+
+	// Assert
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if result.Requeue {
+		t.Error("expected no requeue after successful reconciliation")
+	}
+
+	// Verify Role was created
+	roleList := &rbacv1.RoleList{}
+	if err := c.List(context.Background(), roleList); err != nil {
+		t.Fatalf("failed to list Roles: %v", err)
+	}
+	if len(roleList.Items) != 1 {
+		t.Errorf("expected 1 Role, got %d", len(roleList.Items))
+	}
+
+	role := &roleList.Items[0]
+	expectedName := "pequod:transform:team-a.myapp"
+	if role.Name != expectedName {
+		t.Errorf("expected Role name %q, got %q", expectedName, role.Name)
+	}
+	if role.Namespace != "team-a" {
+		t.Errorf("expected Role namespace 'team-a', got %q", role.Namespace)
+	}
+
+	// Verify RoleBinding was created
+	rbList := &rbacv1.RoleBindingList{}
+	if err := c.List(context.Background(), rbList); err != nil {
+		t.Fatalf("failed to list RoleBindings: %v", err)
+	}
+	if len(rbList.Items) != 1 {
+		t.Errorf("expected 1 RoleBinding, got %d", len(rbList.Items))
+	}
+
+	rb := &rbList.Items[0]
+	if rb.Name != expectedName {
+		t.Errorf("expected RoleBinding name %q, got %q", expectedName, rb.Name)
+	}
+	if rb.RoleRef.Name != expectedName {
+		t.Errorf("expected RoleBinding to reference Role %q, got %q", expectedName, rb.RoleRef.Name)
+	}
+
+	// Verify no ClusterRole was created
+	crList := &rbacv1.ClusterRoleList{}
+	if err := c.List(context.Background(), crList); err != nil {
+		t.Fatalf("failed to list ClusterRoles: %v", err)
+	}
+	if len(crList.Items) != 0 {
+		t.Errorf("expected 0 ClusterRoles for namespace scope, got %d", len(crList.Items))
+	}
+
+	// Verify Transform status
+	updated := &platformv1alpha1.Transform{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "myapp", Namespace: "team-a"}, updated); err != nil {
+		t.Fatalf("failed to get updated transform: %v", err)
+	}
+	if updated.Status.GeneratedRBAC == nil {
+		t.Error("expected GeneratedRBAC to be set in status")
+	} else {
+		if updated.Status.GeneratedRBAC.RoleName != expectedName {
+			t.Errorf("expected RoleName %q in status, got %q", expectedName, updated.Status.GeneratedRBAC.RoleName)
+		}
+		if updated.Status.GeneratedRBAC.RoleBindingName != expectedName {
+			t.Errorf("expected RoleBindingName %q in status, got %q", expectedName, updated.Status.GeneratedRBAC.RoleBindingName)
+		}
+	}
+}
+
+func TestTransformHandlers_Reconcile_NoRBACWithoutManagedResources(t *testing.T) {
+	// Setup: Transform without managedResources
+	tf := &platformv1alpha1.Transform{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "simple-app",
+			Namespace:  "default",
+			Finalizers: []string{TransformFinalizer},
+			UID:        "test-uid-no-rbac",
+		},
+		Spec: platformv1alpha1.TransformSpec{
+			CueRef: platformv1alpha1.CueReference{
+				Type: platformv1alpha1.CueRefTypeEmbedded,
+				Ref:  "webservice",
+			},
+			Group:   "apps.example.com",
+			Version: "v1alpha1",
+			// No ManagedResources - should not generate RBAC
+		},
+	}
+
+	c := newTestClient(tf)
+	handlers := newTestHandlers(c)
+
+	// Act
+	result, err := handlers.Reconcile(context.Background(), types.NamespacedName{
+		Name:      "simple-app",
+		Namespace: "default",
+	})
+
+	// Assert
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if result.Requeue {
+		t.Error("expected no requeue")
+	}
+
+	// Verify no ClusterRole was created
+	crList := &rbacv1.ClusterRoleList{}
+	if err := c.List(context.Background(), crList); err != nil {
+		t.Fatalf("failed to list ClusterRoles: %v", err)
+	}
+	if len(crList.Items) != 0 {
+		t.Errorf("expected 0 ClusterRoles when no managedResources, got %d", len(crList.Items))
+	}
+
+	// Verify no Role was created
+	roleList := &rbacv1.RoleList{}
+	if err := c.List(context.Background(), roleList); err != nil {
+		t.Fatalf("failed to list Roles: %v", err)
+	}
+	if len(roleList.Items) != 0 {
+		t.Errorf("expected 0 Roles when no managedResources, got %d", len(roleList.Items))
+	}
+
+	// Verify Transform status has nil GeneratedRBAC
+	updated := &platformv1alpha1.Transform{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "simple-app", Namespace: "default"}, updated); err != nil {
+		t.Fatalf("failed to get updated transform: %v", err)
+	}
+	if updated.Status.GeneratedRBAC != nil {
+		t.Error("expected GeneratedRBAC to be nil when no managedResources")
+	}
+}
+
+func TestTransformHandlers_HandleDeletion_CleansUpRBAC(t *testing.T) {
+	// Setup: Transform with deletion timestamp and RBAC resources
+	now := metav1.Now()
+	tf := &platformv1alpha1.Transform{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "webservice-delete",
+			Namespace:         "default",
+			Finalizers:        []string{TransformFinalizer},
+			DeletionTimestamp: &now,
+		},
+		Spec: platformv1alpha1.TransformSpec{
+			CueRef: platformv1alpha1.CueReference{
+				Type: platformv1alpha1.CueRefTypeEmbedded,
+				Ref:  "webservice",
+			},
+			Group:     "apps.example.com",
+			RBACScope: platformv1alpha1.RBACScopeCluster,
+			ManagedResources: []platformv1alpha1.ManagedResource{
+				{
+					APIGroup:  "apps",
+					Resources: []string{"deployments"},
+				},
+			},
+		},
+		Status: platformv1alpha1.TransformStatus{
+			GeneratedCRD: &platformv1alpha1.GeneratedCRDReference{
+				Name: "webservice-deletes.apps.example.com",
+			},
+			GeneratedRBAC: &platformv1alpha1.GeneratedRBACReference{
+				ClusterRoleName: "pequod:transform:default.webservice-delete",
+				RuleCount:       1,
+			},
+		},
+	}
+
+	// Create the ClusterRole that would be deleted
+	cr := &rbacv1.ClusterRole{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "pequod:transform:default.webservice-delete",
+		},
+		Rules: []rbacv1.PolicyRule{
+			{
+				APIGroups: []string{"apps"},
+				Resources: []string{"deployments"},
+				Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete"},
+			},
+		},
+	}
+
+	c := newTestClient(tf, cr)
+	handlers := newTestHandlers(c)
+
+	// Verify ClusterRole exists before reconcile
+	crBefore := &rbacv1.ClusterRole{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: cr.Name}, crBefore); err != nil {
+		t.Fatalf("expected ClusterRole to exist before deletion: %v", err)
+	}
+
+	// Act
+	result, err := handlers.Reconcile(context.Background(), types.NamespacedName{
+		Name:      "webservice-delete",
+		Namespace: "default",
+	})
+
+	// Assert
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if result.Requeue {
+		t.Error("expected no requeue after deletion handling")
+	}
+
+	// Verify ClusterRole was deleted
+	crAfter := &rbacv1.ClusterRole{}
+	err = c.Get(context.Background(), types.NamespacedName{Name: cr.Name}, crAfter)
+	if err == nil {
+		t.Error("expected ClusterRole to be deleted")
 	}
 }

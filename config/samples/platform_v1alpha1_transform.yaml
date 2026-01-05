@@ -30,3 +30,20 @@ spec:
   categories:
     - pequod
     - platform
+
+  # Optional: Declare managed resources for dynamic RBAC generation
+  # The operator will create ClusterRoles/Roles with these permissions
+  managedResources:
+    - apiGroup: apps
+      resources:
+        - deployments
+    - apiGroup: ""
+      resources:
+        - services
+        - configmaps
+
+  # Optional: RBAC scope determines where RBAC resources are created
+  # Cluster: Creates a ClusterRole aggregated into the manager's permissions
+  # Namespace: Creates a Role and RoleBinding in the Transform's namespace
+  # Defaults to "Cluster"
+  rbacScope: Cluster

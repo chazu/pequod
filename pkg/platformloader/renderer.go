@@ -44,19 +44,8 @@ func (r *Renderer) RenderTransformWithCueRef(
 	var err error
 
 	switch cueRef.Type {
-	case "embedded":
-		// Load embedded CUE module from operator binary
-		cueValue, err = r.loader.LoadEmbedded(cueRef.Ref)
-		if err != nil {
-			return nil, nil, fmt.Errorf("failed to load embedded CUE module: %w", err)
-		}
-		fetchResult = &FetchResult{
-			Digest: fmt.Sprintf("embedded:%s", cueRef.Ref),
-			Source: fmt.Sprintf("embedded://%s", cueRef.Ref),
-		}
-
 	case InlineType:
-		// Compile inline CUE directly
+		// Compile inline CUE directly (special case - content is in Ref)
 		cueValue = r.loader.ctx.CompileString(cueRef.Ref)
 		if cueValue.Err() != nil {
 			return nil, nil, fmt.Errorf("failed to compile inline CUE: %w", cueValue.Err())
@@ -67,8 +56,8 @@ func (r *Renderer) RenderTransformWithCueRef(
 			Source:  InlineType,
 		}
 
-	case "oci", "git", "configmap":
-		// Use the fetcher system
+	case "embedded", "oci", "git", "configmap":
+		// Use the fetcher system for all external module types
 		fetchResult, err = r.loader.FetchModule(ctx, cueRef.Type, cueRef.Ref, namespace, cueRef.PullSecretRef)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to fetch CUE module: %w", err)

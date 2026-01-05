@@ -37,6 +37,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	platformv1alpha1 "github.com/chazu/pequod/api/v1alpha1"
+	cuembed "github.com/chazu/pequod/cue"
 	"github.com/chazu/pequod/internal/controller"
 	"github.com/chazu/pequod/pkg/platformloader"
 	// +kubebuilder:scaffold:imports
@@ -155,9 +156,11 @@ func setupControllers(mgr ctrl.Manager) error {
 		return err
 	}
 
-	// Setup platform loader with K8s client support for ConfigMap fetching
+	// Setup platform loader with K8s client and embedded CUE modules
 	loader := platformloader.NewLoaderWithConfig(platformloader.LoaderConfig{
-		K8sClient: mgr.GetClient(),
+		K8sClient:       mgr.GetClient(),
+		EmbeddedFS:      cuembed.PlatformFS,
+		EmbeddedRootDir: cuembed.PlatformDir,
 	})
 	renderer := platformloader.NewRenderer(loader)
 

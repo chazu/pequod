@@ -20,6 +20,7 @@ import (
 	platformv1alpha1 "github.com/chazu/pequod/api/v1alpha1"
 	"github.com/chazu/pequod/pkg/crd"
 	"github.com/chazu/pequod/pkg/platformloader"
+	"github.com/chazu/pequod/pkg/rbac"
 	"github.com/chazu/pequod/pkg/schema"
 )
 
@@ -39,6 +40,32 @@ type TransformHandlers struct {
 	loader    *platformloader.Loader
 	extractor *schema.Extractor
 	generator *crd.Generator
+
+	// RBAC management
+	rbacGenerator *rbac.Generator
+	rbacApplier   *rbac.Applier
+
+	// ServiceAccount configuration for RBAC bindings
+	serviceAccountName      string
+	serviceAccountNamespace string
+}
+
+// TransformHandlersConfig holds configuration for TransformHandlers
+type TransformHandlersConfig struct {
+	// ServiceAccountName is the name of the ServiceAccount used by the controller
+	// Used for RoleBindings in namespace-scoped RBAC
+	ServiceAccountName string
+
+	// ServiceAccountNamespace is the namespace of the controller's ServiceAccount
+	ServiceAccountNamespace string
+}
+
+// DefaultTransformHandlersConfig returns the default configuration
+func DefaultTransformHandlersConfig() TransformHandlersConfig {
+	return TransformHandlersConfig{
+		ServiceAccountName:      "pequod-controller-manager",
+		ServiceAccountNamespace: "pequod-system",
+	}
 }
 
 // NewTransformHandlers creates a new handler collection for Transform
@@ -48,13 +75,28 @@ func NewTransformHandlers(
 	recorder record.EventRecorder,
 	loader *platformloader.Loader,
 ) *TransformHandlers {
+	return NewTransformHandlersWithConfig(k8sClient, scheme, recorder, loader, DefaultTransformHandlersConfig())
+}
+
+// NewTransformHandlersWithConfig creates a new handler collection with custom config
+func NewTransformHandlersWithConfig(
+	k8sClient client.Client,
+	scheme *runtime.Scheme,
+	recorder record.EventRecorder,
+	loader *platformloader.Loader,
+	config TransformHandlersConfig,
+) *TransformHandlers {
 	return &TransformHandlers{
-		client:    k8sClient,
-		scheme:    scheme,
-		recorder:  recorder,
-		loader:    loader,
-		extractor: schema.NewExtractor(),
-		generator: crd.NewGenerator(),
+		client:                  k8sClient,
+		scheme:                  scheme,
+		recorder:                recorder,
+		loader:                  loader,
+		extractor:               schema.NewExtractor(),
+		generator:               crd.NewGenerator(),
+		rbacGenerator:           rbac.NewGenerator(),
+		rbacApplier:             rbac.NewApplier(k8sClient),
+		serviceAccountName:      config.ServiceAccountName,
+		serviceAccountNamespace: config.ServiceAccountNamespace,
 	}
 }
 
@@ -182,8 +224,24 @@ func (h *TransformHandlers) Reconcile(ctx context.Context, nn types.NamespacedNa
 		return ctrl.Result{}, err
 	}
 
-	// Step 6: Update final status
-	return h.updateStatus(ctx, tf, generatedCRD, fetchResult)
+	// Step 6: Generate and apply RBAC (if managedResources defined)
+	generatedRBAC, err := h.generateAndApplyRBAC(ctx, tf)
+	if err != nil {
+		tf.Status.Phase = platformv1alpha1.TransformPhaseFailed
+		tf.SetCondition(
+			"RBACConfigured",
+			metav1.ConditionFalse,
+			"RBACFailed",
+			fmt.Sprintf("Failed to generate/apply RBAC: %v", err),
+		)
+		if statusErr := h.client.Status().Update(ctx, tf); statusErr != nil {
+			logger.Error(statusErr, "failed to update status after RBAC failure")
+		}
+		return ctrl.Result{}, err
+	}
+
+	// Step 7: Update final status
+	return h.updateStatus(ctx, tf, generatedCRD, generatedRBAC, fetchResult)
 }
 
 // fetchAndExtractSchema fetches the CUE module and extracts the input schema
@@ -203,19 +261,8 @@ func (h *TransformHandlers) fetchAndExtractSchema(
 	}
 
 	switch tf.Spec.CueRef.Type {
-	case platformv1alpha1.CueRefTypeEmbedded:
-		// Load embedded module
-		cueValue, err = h.loader.LoadEmbedded(tf.Spec.CueRef.Ref)
-		if err != nil {
-			return nil, nil, fmt.Errorf("failed to load embedded CUE module: %w", err)
-		}
-		fetchResult = &platformloader.FetchResult{
-			Digest: fmt.Sprintf("embedded:%s", tf.Spec.CueRef.Ref),
-			Source: fmt.Sprintf("embedded://%s", tf.Spec.CueRef.Ref),
-		}
-
 	case platformv1alpha1.CueRefTypeInline:
-		// Compile inline CUE
+		// Compile inline CUE (special case - content is in Ref)
 		cueValue = h.loader.Context().CompileString(tf.Spec.CueRef.Ref)
 		if cueValue.Err() != nil {
 			return nil, nil, fmt.Errorf("failed to compile inline CUE: %w", cueValue.Err())
@@ -226,8 +273,8 @@ func (h *TransformHandlers) fetchAndExtractSchema(
 			Source:  platformloader.InlineType,
 		}
 
-	case platformv1alpha1.CueRefTypeOCI, platformv1alpha1.CueRefTypeGit, platformv1alpha1.CueRefTypeConfigMap:
-		// Use fetcher system
+	case platformv1alpha1.CueRefTypeEmbedded, platformv1alpha1.CueRefTypeOCI, platformv1alpha1.CueRefTypeGit, platformv1alpha1.CueRefTypeConfigMap:
+		// Use fetcher system for all external module types
 		fetchResult, err = h.loader.FetchModule(ctx, string(tf.Spec.CueRef.Type), tf.Spec.CueRef.Ref, tf.Namespace, pullSecretRef)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to fetch CUE module: %w", err)
@@ -316,10 +363,68 @@ func (h *TransformHandlers) generateAndApplyCRD(
 	return ref, nil
 }
 
+// generateAndApplyRBAC generates and applies RBAC resources for a Transform
+// Returns nil if no managedResources are defined (backwards compatible)
+func (h *TransformHandlers) generateAndApplyRBAC(
+	ctx context.Context, tf *platformv1alpha1.Transform,
+) (*platformv1alpha1.GeneratedRBACReference, error) {
+	logger := log.FromContext(ctx)
+
+	// Generate RBAC resources from Transform spec
+	generatedRBAC := h.rbacGenerator.Generate(tf, h.serviceAccountName, h.serviceAccountNamespace)
+
+	// If no managedResources, nothing to generate
+	if generatedRBAC == nil {
+		logger.V(1).Info("No managedResources defined, skipping RBAC generation")
+		return nil, nil
+	}
+
+	// Apply the generated RBAC resources
+	if err := h.rbacApplier.ApplyGeneratedRBAC(ctx, generatedRBAC); err != nil {
+		return nil, fmt.Errorf("failed to apply RBAC resources: %w", err)
+	}
+
+	// Build the reference for status
+	ref := h.rbacGenerator.ToGeneratedRBACReference(generatedRBAC)
+
+	// Log what was created
+	if generatedRBAC.ClusterRole != nil {
+		logger.Info("Applied RBAC resources",
+			"scope", "Cluster",
+			"clusterRole", generatedRBAC.ClusterRole.Name,
+			"ruleCount", len(generatedRBAC.ClusterRole.Rules))
+	}
+	if generatedRBAC.Role != nil {
+		logger.Info("Applied RBAC resources",
+			"scope", "Namespace",
+			"role", generatedRBAC.Role.Name,
+			"roleBinding", generatedRBAC.RoleBinding.Name,
+			"ruleCount", len(generatedRBAC.Role.Rules))
+	}
+
+	// Record event
+	if h.recorder != nil {
+		if generatedRBAC.ClusterRole != nil {
+			h.recorder.Eventf(tf, "Normal", "RBACConfigured",
+				"Applied ClusterRole %s with %d rules",
+				generatedRBAC.ClusterRole.Name, len(generatedRBAC.ClusterRole.Rules))
+		}
+		if generatedRBAC.Role != nil {
+			h.recorder.Eventf(tf, "Normal", "RBACConfigured",
+				"Applied Role %s and RoleBinding %s in namespace %s",
+				generatedRBAC.Role.Name, generatedRBAC.RoleBinding.Name, tf.Namespace)
+		}
+	}
+
+	return ref, nil
+}
+
 // updateStatus updates the Transform status with the generated CRD reference
 func (h *TransformHandlers) updateStatus(
 	ctx context.Context, tf *platformv1alpha1.Transform,
-	generatedCRD *platformv1alpha1.GeneratedCRDReference, fetchResult *platformloader.FetchResult,
+	generatedCRD *platformv1alpha1.GeneratedCRDReference,
+	generatedRBAC *platformv1alpha1.GeneratedRBACReference,
+	fetchResult *platformloader.FetchResult,
 ) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
@@ -328,6 +433,9 @@ func (h *TransformHandlers) updateStatus(
 
 	// Update GeneratedCRD reference
 	tf.Status.GeneratedCRD = generatedCRD
+
+	// Update GeneratedRBAC reference
+	tf.Status.GeneratedRBAC = generatedRBAC
 
 	// Update ResolvedCueRef with fetch result
 	if fetchResult != nil {
@@ -352,6 +460,23 @@ func (h *TransformHandlers) updateStatus(
 		"SchemaExtracted",
 		"Input schema extracted from CUE module",
 	)
+
+	// Set RBAC condition (only if RBAC was generated)
+	if generatedRBAC != nil {
+		var rbacMessage string
+		if generatedRBAC.ClusterRoleName != "" {
+			rbacMessage = fmt.Sprintf("ClusterRole %s configured with %d rules", generatedRBAC.ClusterRoleName, generatedRBAC.RuleCount)
+		} else if generatedRBAC.RoleName != "" {
+			rbacMessage = fmt.Sprintf("Role %s and RoleBinding %s configured with %d rules",
+				generatedRBAC.RoleName, generatedRBAC.RoleBindingName, generatedRBAC.RuleCount)
+		}
+		tf.SetCondition(
+			"RBACConfigured",
+			metav1.ConditionTrue,
+			"RBACApplied",
+			rbacMessage,
+		)
+	}
 
 	// Update observed generation
 	tf.Status.ObservedGeneration = tf.Generation
@@ -406,6 +531,23 @@ func (h *TransformHandlers) handleDeletion(ctx context.Context, tf *platformv1al
 			logger.Info("Deleted generated CRD", "name", crdName)
 			if h.recorder != nil {
 				h.recorder.Eventf(tf, "Normal", "CRDDeleted", "Deleted generated CRD %s", crdName)
+			}
+		}
+	}
+
+	// Delete the generated RBAC resources if any were created
+	if len(tf.Spec.ManagedResources) > 0 {
+		logger.Info("Deleting generated RBAC resources",
+			"transform", tf.Name,
+			"scope", tf.Spec.RBACScope)
+
+		if err := h.rbacApplier.DeleteGeneratedRBAC(ctx, tf.Name, tf.Namespace, tf.Spec.RBACScope); err != nil {
+			logger.Error(err, "Failed to delete generated RBAC resources")
+			// Don't block deletion on RBAC cleanup failure
+		} else {
+			logger.Info("Deleted generated RBAC resources")
+			if h.recorder != nil {
+				h.recorder.Eventf(tf, "Normal", "RBACDeleted", "Deleted generated RBAC resources for Transform %s", tf.Name)
 			}
 		}
 	}

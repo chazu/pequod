@@ -112,6 +112,41 @@ spec:
                   Group is the API group for the generated CRD
                   Defaults to "platform.pequod.io"
                 type: string
+              managedResources:
+                description: |-
+                  ManagedResources declares the Kubernetes resource types that this
+                  Transform's CUE template will create. Used to generate scoped RBAC.
+                  If empty, the Transform will not generate any RBAC rules.
+                items:
+                  description: ManagedResource defines a Kubernetes resource type
+                    that a Transform manages
+                  properties:
+                    apiGroup:
+                      description: APIGroup is the API group of the resource (e.g.,
+                        "apps", "" for core)
+                      type: string
+                    resources:
+                      description: Resources is the list of resources in this API
+                        group (e.g., ["deployments", "statefulsets"])
+                      items:
+                        type: string
+                      minItems: 1
+                      type: array
+                  required:
+                  - resources
+                  type: object
+                type: array
+              rbacScope:
+                default: Cluster
+                description: |-
+                  RBACScope determines whether to create cluster-wide or namespace-scoped RBAC.
+                  Cluster: Creates a ClusterRole aggregated into the manager's permissions.
+                  Namespace: Creates a Role and RoleBinding in the Transform's namespace.
+                  Defaults to Cluster if not specified.
+                enum:
+                - Cluster
+                - Namespace
+                type: string
               shortNames:
                 description: ShortNames are optional short names for the generated
                   CRD
@@ -137,6 +172,7 @@ spec:
                   - "CueFetched": CUE module fetched successfully
                   - "SchemaExtracted": Input schema extracted from CUE
                   - "CRDGenerated": CRD generated and applied to cluster
+                  - "RBACConfigured": RBAC resources generated and applied
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -217,6 +253,28 @@ spec:
                 - kind
                 - name
                 - plural
+                type: object
+              generatedRBAC:
+                description: GeneratedRBAC contains information about the generated
+                  RBAC resources
+                properties:
+                  clusterRoleName:
+                    description: ClusterRoleName is the name of the generated ClusterRole
+                      (if scope=Cluster)
+                    type: string
+                  roleBindingName:
+                    description: RoleBindingName is the name of the generated RoleBinding
+                      (if scope=Namespace)
+                    type: string
+                  roleName:
+                    description: RoleName is the name of the generated Role (if scope=Namespace)
+                    type: string
+                  ruleCount:
+                    description: RuleCount is the number of policy rules in the generated
+                      role
+                    type: integer
+                required:
+                - ruleCount
                 type: object
               observedGeneration:
                 description: ObservedGeneration is the generation observed by the

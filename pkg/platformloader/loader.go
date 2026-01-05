@@ -3,7 +3,7 @@ package platformloader
 import (
 	"context"
 	"fmt"
-	"os"
+	"io/fs"
 	"path/filepath"
 
 	"cuelang.org/go/cue"
@@ -27,6 +27,12 @@ type LoaderConfig struct {
 
 	// K8sClient is the Kubernetes client for ConfigMap fetching
 	K8sClient client.Client
+
+	// EmbeddedFS is the filesystem containing embedded CUE modules (from go:embed)
+	EmbeddedFS fs.FS
+
+	// EmbeddedRootDir is the root directory within EmbeddedFS (e.g., "platform")
+	EmbeddedRootDir string
 }
 
 // NewLoader creates a new platform loader with caching
@@ -44,12 +50,18 @@ func NewLoaderWithConfig(config LoaderConfig) *Loader {
 		cache: NewCache(),
 	}
 
-	if config.K8sClient != nil {
+	// Initialize fetchers if we have a K8s client or embedded filesystem
+	if config.K8sClient != nil || config.EmbeddedFS != nil {
 		cacheDir := config.CacheDir
 		if cacheDir == "" {
 			cacheDir = DefaultCacheDir
 		}
-		loader.fetchers = NewFetcherRegistry(config.K8sClient, cacheDir)
+		loader.fetchers = NewFetcherRegistry(FetcherRegistryConfig{
+			K8sClient:       config.K8sClient,
+			CacheDir:        cacheDir,
+			EmbeddedFS:      config.EmbeddedFS,
+			EmbeddedRootDir: config.EmbeddedRootDir,
+		})
 	}
 
 	return loader
@@ -98,56 +110,6 @@ func (l *Loader) LoadFromContent(content []byte) (cue.Value, error) {
 		return cue.Value{}, fmt.Errorf("failed to compile CUE content: %w", value.Err())
 	}
 	return value, nil
-}
-
-// LoadEmbedded loads an embedded CUE module by version
-// For now, version is ignored and we load from the cue/platform directory
-// TODO: In production, this should use go:embed with proper paths
-func (l *Loader) LoadEmbedded(version string) (cue.Value, error) {
-	// Check cache first
-	cacheKey := fmt.Sprintf("embedded:%s", version)
-	if cached, found := l.cache.Get(cacheKey); found {
-		return cached, nil
-	}
-
-	// Find the cue/platform directory relative to the current working directory
-	// This works for both development and testing
-	cuePath, err := l.findCuePlatformPath()
-	if err != nil {
-		return cue.Value{}, fmt.Errorf("failed to find CUE platform path: %w", err)
-	}
-
-	// Load from the webservice package
-	webservicePath := filepath.Join(cuePath, "webservice")
-	value, err := l.LoadFromPath(webservicePath)
-	if err != nil {
-		return cue.Value{}, fmt.Errorf("failed to load embedded module: %w", err)
-	}
-
-	// Cache the loaded value
-	l.cache.Set(cacheKey, value)
-
-	return value, nil
-}
-
-// findCuePlatformPath locates the cue/platform directory
-func (l *Loader) findCuePlatformPath() (string, error) {
-	// Try current directory first
-	if _, err := os.Stat("cue/platform"); err == nil {
-		return "cue/platform", nil
-	}
-
-	// Try going up one level (for tests in pkg/platformloader)
-	if _, err := os.Stat("../../cue/platform"); err == nil {
-		return "../../cue/platform", nil
-	}
-
-	// Try going up two levels (for deeply nested tests)
-	if _, err := os.Stat("../../../cue/platform"); err == nil {
-		return "../../../cue/platform", nil
-	}
-
-	return "", fmt.Errorf("could not find cue/platform directory")
 }
 
 // LoadFromPath loads a CUE module from a filesystem path

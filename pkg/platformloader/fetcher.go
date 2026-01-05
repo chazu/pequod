@@ -3,6 +3,7 @@ package platformloader
 import (
 	"context"
 	"fmt"
+	"io/fs"
 
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -42,21 +43,37 @@ type FetcherRegistry struct {
 	client   client.Client
 }
 
+// FetcherRegistryConfig contains configuration for the FetcherRegistry
+type FetcherRegistryConfig struct {
+	// K8sClient is the Kubernetes client for ConfigMap fetching
+	K8sClient client.Client
+	// CacheDir is the directory for the disk cache
+	CacheDir string
+	// EmbeddedFS is the filesystem containing embedded CUE modules (from go:embed)
+	EmbeddedFS fs.FS
+	// EmbeddedRootDir is the root directory within EmbeddedFS (e.g., "platform")
+	EmbeddedRootDir string
+}
+
 // NewFetcherRegistry creates a new fetcher registry with all supported fetchers
-func NewFetcherRegistry(k8sClient client.Client, cacheDir string) *FetcherRegistry {
-	diskCache := NewDiskCache(cacheDir)
+func NewFetcherRegistry(config FetcherRegistryConfig) *FetcherRegistry {
+	diskCache := NewDiskCache(config.CacheDir)
 
 	registry := &FetcherRegistry{
 		fetchers: make(map[string]Fetcher),
-		client:   k8sClient,
+		client:   config.K8sClient,
 	}
 
 	// Register all fetchers
 	registry.fetchers["oci"] = NewOCIFetcher(diskCache)
 	registry.fetchers["git"] = NewGitFetcher(diskCache)
-	registry.fetchers["configmap"] = NewConfigMapFetcher(k8sClient)
+	registry.fetchers["configmap"] = NewConfigMapFetcher(config.K8sClient)
 	registry.fetchers[InlineType] = NewInlineFetcher()
-	registry.fetchers["embedded"] = NewEmbeddedFetcher()
+
+	// Register embedded fetcher with the provided filesystem
+	if config.EmbeddedFS != nil {
+		registry.fetchers["embedded"] = NewEmbeddedFetcher(config.EmbeddedFS, config.EmbeddedRootDir)
+	}
 
 	return registry
 }
