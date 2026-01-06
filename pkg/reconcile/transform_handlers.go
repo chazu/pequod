@@ -207,6 +207,14 @@ func (h *TransformHandlers) Reconcile(ctx context.Context, nn types.NamespacedNa
 		}
 	}
 
+	// Early exit: if Transform is already Ready and spec hasn't changed, skip reconciliation
+	// This prevents a reconcile loop where status updates trigger unnecessary re-processing
+	if tf.Status.Phase == platformv1alpha1.TransformPhaseReady &&
+		tf.Status.ObservedGeneration == tf.Generation {
+		logger.V(1).Info("Transform already reconciled, skipping")
+		return ctrl.Result{}, nil
+	}
+
 	// Update phase to Fetching
 	if err := h.updateStatusWithRetry(ctx, tf, func(latestTf *platformv1alpha1.Transform) {
 		latestTf.Status.Phase = platformv1alpha1.TransformPhaseFetching

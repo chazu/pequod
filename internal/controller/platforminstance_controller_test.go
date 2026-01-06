@@ -32,7 +32,19 @@ import (
 	platformv1alpha1 "github.com/chazu/pequod/api/v1alpha1"
 )
 
-var _ = Describe("PlatformInstance Controller", Ordered, func() {
+// PlatformInstance tests are labeled "dynamic-watches" because they create dynamic
+// watches that cannot be removed from a running controller-runtime manager.
+// These tests must be run separately from other controller tests:
+//
+//	# Run only PlatformInstance tests:
+//	go test ./internal/controller/... --ginkgo.label-filter="dynamic-watches"
+//
+//	# Run all OTHER tests (excluding PlatformInstance):
+//	go test ./internal/controller/... --ginkgo.label-filter="!dynamic-watches"
+var _ = Describe("PlatformInstance Controller", Ordered, Label("dynamic-watches"), func() {
+	// This test suite uses the shared manager from suite_test.go.
+	// It is marked Ordered so all tests run together as a unit.
+
 	Context("When reconciling a platform instance", func() {
 		const (
 			transformName = "instance-test-transform"
@@ -105,17 +117,12 @@ var _ = Describe("PlatformInstance Controller", Ordered, func() {
 		})
 
 		AfterAll(func() {
-			By("Cleaning up the Transform")
-			tf := &platformv1alpha1.Transform{}
-			if err := k8sClient.Get(ctx, transformNN, tf); err == nil {
-				Expect(k8sClient.Delete(ctx, tf)).To(Succeed())
-
-				// Wait for Transform to be fully deleted
-				Eventually(func() bool {
-					err := k8sClient.Get(ctx, transformNN, tf)
-					return client.IgnoreNotFound(err) == nil && err != nil
-				}, timeout, interval).Should(BeTrue())
-			}
+			// Note: We intentionally do NOT delete the Transform here.
+			// Deleting it would trigger CRD deletion, but the dynamic watch
+			// added by PlatformInstance controller cannot be removed at runtime.
+			// The orphaned watch would spam "Failed to watch" errors and interfere
+			// with subsequent tests. Instead, we leave the Transform/CRD in place;
+			// the envtest cleanup in AfterSuite will handle it.
 		})
 
 		AfterEach(func() {

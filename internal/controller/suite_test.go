@@ -129,7 +129,7 @@ var _ = BeforeSuite(func() {
 	}).SetupWithManager(k8sManager)
 	Expect(err).ToNot(HaveOccurred())
 
-	// Setup PlatformInstance controller (watches dynamically generated CRDs)
+	// Setup PlatformInstance controller (renders platform instance CRs to ResourceGraphs)
 	renderer := platformloader.NewRenderer(loader)
 	err = (&PlatformInstanceReconciler{
 		Client:   k8sManager.GetClient(),

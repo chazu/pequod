@@ -85,10 +85,10 @@ func TestEmbeddedFetcher_Type(t *testing.T) {
 
 func TestEmbeddedFetcher_ListModules(t *testing.T) {
 	testFS := fstest.MapFS{
-		"platform/module1/main.cue":  &fstest.MapFile{Data: []byte("test: 1")},
-		"platform/module2/main.cue":  &fstest.MapFile{Data: []byte("test: 2")},
-		"platform/.hidden/main.cue":  &fstest.MapFile{Data: []byte("hidden: true")},
-		"platform/notamodule.txt":    &fstest.MapFile{Data: []byte("not a module")},
+		"platform/module1/main.cue": &fstest.MapFile{Data: []byte("test: 1")},
+		"platform/module2/main.cue": &fstest.MapFile{Data: []byte("test: 2")},
+		"platform/.hidden/main.cue": &fstest.MapFile{Data: []byte("hidden: true")},
+		"platform/notamodule.txt":   &fstest.MapFile{Data: []byte("not a module")},
 	}
 
 	fetcher := NewEmbeddedFetcher(testFS, "platform")
@@ -148,9 +148,9 @@ func TestEmbeddedFetcher_MultipleCUEFiles(t *testing.T) {
 
 func TestEmbeddedFetcher_NestedDirectories(t *testing.T) {
 	testFS := fstest.MapFS{
-		"platform/nested/main.cue":             &fstest.MapFile{Data: []byte("main: true")},
-		"platform/nested/subdir/nested.cue":    &fstest.MapFile{Data: []byte("nested: true")},
-		"platform/nested/.hidden/hidden.cue":   &fstest.MapFile{Data: []byte("hidden: true")},
+		"platform/nested/main.cue":           &fstest.MapFile{Data: []byte("main: true")},
+		"platform/nested/subdir/nested.cue":  &fstest.MapFile{Data: []byte("nested: true")},
+		"platform/nested/.hidden/hidden.cue": &fstest.MapFile{Data: []byte("hidden: true")},
 	}
 
 	fetcher := NewEmbeddedFetcher(testFS, "platform")
@@ -174,9 +174,9 @@ func TestEmbeddedFetcher_NestedDirectories(t *testing.T) {
 
 func TestEmbeddedFetcher_NonCUEFilesIgnored(t *testing.T) {
 	testFS := fstest.MapFS{
-		"platform/mixed/main.cue":     &fstest.MapFile{Data: []byte("cue: true")},
-		"platform/mixed/readme.txt":   &fstest.MapFile{Data: []byte("readme content")},
-		"platform/mixed/config.json":  &fstest.MapFile{Data: []byte(`{"json": true}`)},
+		"platform/mixed/main.cue":    &fstest.MapFile{Data: []byte("cue: true")},
+		"platform/mixed/readme.txt":  &fstest.MapFile{Data: []byte("readme content")},
+		"platform/mixed/config.json": &fstest.MapFile{Data: []byte(`{"json": true}`)},
 	}
 
 	fetcher := NewEmbeddedFetcher(testFS, "platform")
